@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 HOST = "0.0.0.0"
 PORT = 8080
@@ -794,11 +794,23 @@ def build_status_payload() -> Dict[str, Any]:
             for t in targets
             if t.get("online") and t.get("avg_ms") is not None
         ]
+        online_mins = [
+            float(t["min_ms"])
+            for t in targets
+            if t.get("online") and t.get("min_ms") is not None
+        ]
+        online_maxs = [
+            float(t["max_ms"])
+            for t in targets
+            if t.get("online") and t.get("max_ms") is not None
+        ]
         ping_summary = {
             "total": len(targets),
             "online": online_n,
             "offline": max(0, len(targets) - online_n),
             "avg_ms": round(sum(online_avgs) / len(online_avgs), 1) if online_avgs else None,
+            "min_ms": round(min(online_mins), 1) if online_mins else None,
+            "max_ms": round(max(online_maxs), 1) if online_maxs else None,
         }
         payload = {
             "ok": True,
@@ -1147,8 +1159,34 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   border: 1px solid rgba(0,255,106,0.15);
   padding: 8px 10px;
   border-radius: 3px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0,255,106,0.25) rgba(0,0,0,0.2);
 }
-.term-line { margin-bottom: 3px; white-space: pre-wrap; word-break: break-word; }
+.term-body::-webkit-scrollbar {
+  width: 6px;
+}
+.term-body::-webkit-scrollbar-track {
+  background: rgba(0,0,0,0.2);
+  border-radius: 3px;
+}
+.term-body::-webkit-scrollbar-thumb {
+  background: rgba(0,255,106,0.25);
+  border-radius: 3px;
+}
+.term-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,255,106,0.4);
+}
+.term-line {
+  margin-bottom: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 2px 4px;
+  border-radius: 2px;
+  transition: background 0.15s;
+}
+.term-line:hover {
+  background: rgba(0,255,106,0.06);
+}
 .term-line .ts { color: var(--dim); }
 .term-line .lv { font-weight: bold; margin: 0 6px; }
 .term-line .lv.INFO { color: #7fd4ff; }
@@ -1218,17 +1256,39 @@ footer.status-bar strong {
   footer.status-bar .footer-inner {
     gap: 5px 6px;
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    justify-content: center;
   }
-  footer.status-bar .f-item { height: 24px; padding: 0 7px; }
+  footer.status-bar .f-item { height: 24px; padding: 0 7px; flex: 0 1 auto; }
   .wrap { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (max-width: 480px) {
+  footer.status-bar .footer-inner {
+    gap: 4px 5px;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+  footer.status-bar .f-item {
+    height: 22px;
+    padding: 0 6px;
+    font-size: 9px;
+  }
 }
 .err-banner {
   display: none;
   margin-bottom: 10px; padding: 8px 12px;
   border: 1px solid var(--danger); color: var(--danger);
   background: rgba(40,0,8,0.7); border-radius: 3px;
+  font-size: 12px;
+  animation: banner-pulse 2s ease-in-out infinite;
+}
+@keyframes banner-pulse {
+  0%, 100% { border-color: rgba(255,51,85,0.5); box-shadow: 0 0 4px rgba(255,51,85,0.15); }
+  50% { border-color: rgba(255,51,85,0.9); box-shadow: 0 0 8px rgba(255,51,85,0.3); }
 }
 .err-banner.show { display: block; }
+.err-banner::before {
+  content: "⚠ ";
+  font-weight: bold;
+}
 
 /* ---- 顶栏操作区 ---- */
 .header-actions {
@@ -1263,11 +1323,13 @@ footer.status-bar strong {
 .icon-btn.busy { opacity: 0.55; pointer-events: none; }
 .ver-chip {
   font-size: 10px;
-  color: var(--dim);
-  border: 1px solid rgba(0,255,106,0.25);
+  color: var(--ok);
+  border: 1px solid rgba(0,255,106,0.35);
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 2px 10px;
   letter-spacing: 0.04em;
+  background: rgba(0,255,106,0.08);
+  box-shadow: 0 0 6px rgba(0,255,106,0.12);
 }
 .mode-chip {
   font-size: 10px;
@@ -1275,9 +1337,14 @@ footer.status-bar strong {
   color: var(--warn);
   border: 1px solid rgba(255,204,0,0.35);
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 2px 10px;
+  background: rgba(255,204,0,0.08);
 }
-.mode-chip.host { color: var(--ok); border-color: rgba(0,255,106,0.35); }
+.mode-chip.host {
+  color: var(--ok);
+  border-color: rgba(0,255,106,0.35);
+  background: rgba(0,255,106,0.08);
+}
 .toolbar {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   margin-bottom: 10px;
@@ -1356,8 +1423,13 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
   border: 1px solid rgba(0,255,106,0.18);
   background: rgba(0,0,0,0.22);
   border-radius: 4px;
-  padding: 8px;
+  padding: 10px;
   font-size: 11px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.ping-card:hover {
+  border-color: rgba(0,255,106,0.35);
+  box-shadow: 0 0 6px rgba(0,255,106,0.12);
 }
 .ping-card .name { color: var(--text); margin-bottom: 2px; }
 .ping-card .host { color: var(--dim); font-size: 10px; margin-bottom: 6px; word-break: break-all; }
@@ -1523,7 +1595,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         <option value="error">仅错误</option>
       </select>
     </label>
-    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新</span>
+    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新 · 日期时间为浏览器本地时区</span>
   </div>
 
   <div class="grid">
@@ -1711,8 +1783,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
     var last = arr[arr.length - 1];
     var color = last >= 300 ? "#ff3355" : (last >= 100 ? "#ffcc00" : "#00ff88");
+    var fillId = "sf" + Math.random().toString(36).slice(2, 8);
+    var areaPts = pts.join(" ") + " " + (w - pad).toFixed(1) + "," + (h - pad).toFixed(1) + " " + pad.toFixed(1) + "," + (h - pad).toFixed(1);
     return '<svg class="spark" viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
-      '" aria-hidden="true"><polyline fill="none" stroke="' + color +
+      '" aria-hidden="true">' +
+      '<defs><linearGradient id="' + fillId + '" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.3"/>' +
+      '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
+      '</linearGradient></defs>' +
+      '<polygon fill="url(#' + fillId + ')" points="' + areaPts + '"/>' +
+      '<polyline fill="none" stroke="' + color +
       '" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" points="' +
       pts.join(" ") + '"/></svg>';
   }
@@ -1893,10 +1973,14 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var avg = s.avg_ms != null ? Number(s.avg_ms).toFixed(1) + " ms" : "—";
     var ratio = total ? online / total : 0;
     var cls = ratio >= 0.85 ? "ok" : (ratio >= 0.5 ? "warn" : "danger");
+    var globalMin = s.min_ms != null ? Number(s.min_ms).toFixed(1) + " ms" : "—";
+    var globalMax = s.max_ms != null ? Number(s.max_ms).toFixed(1) + " ms" : "—";
     el.innerHTML =
       '<span class="ps ' + cls + '">在线 <strong>' + online + "/" + total + "</strong></span>" +
       '<span class="ps">离线 <strong>' + offline + "</strong></span>" +
-      '<span class="ps">在线均延迟 <strong>' + esc(avg) + "</strong></span>" +
+      '<span class="ps">均延迟 <strong>' + esc(avg) + "</strong></span>" +
+      '<span class="ps">最低 <strong>' + esc(globalMin) + "</strong></span>" +
+      '<span class="ps">最高 <strong>' + esc(globalMax) + "</strong></span>" +
       (ping && ping.icmp_available === false
         ? '<span class="ps warn">模式 <strong>TCP 回退</strong></span>'
         : '<span class="ps">模式 <strong>ICMP+TCP</strong></span>');
@@ -2135,7 +2219,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var drops = [];
   var cols = 0;
   var fontSize = 16;
-  var chars = "01ﾊﾞｼﾞﾄﾞ01";
+  var chars = "01ﾊﾞｼﾞﾄﾞﾄﾞﾉﾒﾘﾔﾕﾗﾜﾝ0101ABCDEF";
   var rainActive = true;
   var lastFrame = 0;
   var frameGap = 66; /* ~15fps */
