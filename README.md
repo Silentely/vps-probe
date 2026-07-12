@@ -13,7 +13,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/依赖-仅%20psutil-0A0&logo=python&logoColor=white" alt="psutil" />
+  <img src="https://img.shields.io/badge/依赖-仅%20psutil-0A0A0A?logo=python&logoColor=white" alt="psutil" />
   <img src="https://img.shields.io/badge/配置-零%20env%20/%20零%20config-00aa55" alt="零配置" />
   <img src="https://img.shields.io/badge/前端-无%20Node%20/%20无构建-111" alt="无前端构建" />
   <img src="https://img.shields.io/badge/默认端口-8080-00ff6a" alt="8080" />
