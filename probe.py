@@ -7,6 +7,7 @@ VPS Probe — 极简单页 VPS 探针监控
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -32,13 +33,14 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 HOST = "0.0.0.0"
 PORT = 8080
 
 METRICS_INTERVAL = 2.0          # 系统指标采集间隔（秒）
 PING_INTERVAL = 12.0            # Ping 调度间隔（秒）；目标增多后略放宽
-PING_TIMEOUT = 2                # 单次 Ping 超时（秒）
+PING_TIMEOUT = 2                # 单次 ICMP 超时（秒）
+TCP_TIMEOUT = 2.0               # TCP 443 回退探测超时（秒）
 PING_HISTORY_SIZE = 30          # 每目标保留的延迟样本数
 EVENT_MAX = 100                 # 事件最多保留条数
 EVENT_DEDUP_WINDOW = 60.0       # 相同异常限频窗口（秒）
@@ -50,22 +52,23 @@ DANGER_LATENCY_MS = 300.0
 WARN_LOSS = 20.0
 DANGER_LOSS = 50.0
 
-# 内置 Ping 目标（客户端不可改）；覆盖公共 DNS / 云厂商 / 常见站点
-PING_TARGETS: List[Dict[str, str]] = [
-    {"id": "cf_dns", "name": "Cloudflare DNS", "host": "1.1.1.1"},
-    {"id": "cf_dns2", "name": "Cloudflare DNS2", "host": "1.0.0.1"},
-    {"id": "google_dns", "name": "Google DNS", "host": "8.8.8.8"},
-    {"id": "google_dns2", "name": "Google DNS2", "host": "8.8.4.4"},
-    {"id": "quad9", "name": "Quad9 DNS", "host": "9.9.9.9"},
-    {"id": "ali_dns", "name": "AliDNS", "host": "223.5.5.5"},
-    {"id": "dns114", "name": "114 DNS", "host": "114.114.114.114"},
-    {"id": "cf_web", "name": "Cloudflare", "host": "cloudflare.com"},
-    {"id": "google_web", "name": "Google", "host": "google.com"},
-    {"id": "github", "name": "GitHub", "host": "github.com"},
-    {"id": "baidu", "name": "Baidu", "host": "baidu.com"},
-    {"id": "microsoft", "name": "Microsoft", "host": "microsoft.com"},
-    {"id": "apple", "name": "Apple", "host": "apple.com"},
-    {"id": "amazon", "name": "Amazon", "host": "amazon.com"},
+# 内置探测目标（客户端不可改）
+# group: dns|web；soft_alert: 国内环境易不可达，仅边沿告警、不刷丢包噪音
+PING_TARGETS: List[Dict[str, Any]] = [
+    {"id": "cf_dns", "name": "Cloudflare DNS", "host": "1.1.1.1", "group": "dns", "soft_alert": False},
+    {"id": "cf_dns2", "name": "Cloudflare DNS2", "host": "1.0.0.1", "group": "dns", "soft_alert": False},
+    {"id": "google_dns", "name": "Google DNS", "host": "8.8.8.8", "group": "dns", "soft_alert": False},
+    {"id": "google_dns2", "name": "Google DNS2", "host": "8.8.4.4", "group": "dns", "soft_alert": False},
+    {"id": "quad9", "name": "Quad9 DNS", "host": "9.9.9.9", "group": "dns", "soft_alert": False},
+    {"id": "ali_dns", "name": "AliDNS", "host": "223.5.5.5", "group": "dns", "soft_alert": False},
+    {"id": "dns114", "name": "114 DNS", "host": "114.114.114.114", "group": "dns", "soft_alert": False},
+    {"id": "cf_web", "name": "Cloudflare", "host": "cloudflare.com", "group": "web", "soft_alert": False},
+    {"id": "google_web", "name": "Google", "host": "google.com", "group": "web", "soft_alert": True},
+    {"id": "github", "name": "GitHub", "host": "github.com", "group": "web", "soft_alert": False},
+    {"id": "baidu", "name": "Baidu", "host": "baidu.com", "group": "web", "soft_alert": False},
+    {"id": "microsoft", "name": "Microsoft", "host": "microsoft.com", "group": "web", "soft_alert": True},
+    {"id": "apple", "name": "Apple", "host": "apple.com", "group": "web", "soft_alert": False},
+    {"id": "amazon", "name": "Amazon", "host": "amazon.com", "group": "web", "soft_alert": True},
 ]
 
 # ---------------------------------------------------------------------------
@@ -102,10 +105,62 @@ _prev_alerts: Dict[str, bool] = {
     "disk": False,
 }
 _cpu_primed = False
+_runtime_mode: Optional[str] = None  # host | container
+_html_body: Optional[bytes] = None
+_html_etag: Optional[str] = None
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _tz_label() -> str:
+    """本地时区偏移，如 +0800 / UTC。"""
+    try:
+        off = time.strftime("%z") or ""
+        if off in ("", "+0000", "-0000"):
+            return "UTC"
+        return f"UTC{off[:3]}:{off[3:]}" if len(off) >= 5 else f"UTC{off}"
+    except Exception:
+        return "unknown"
+
+
+def detect_runtime() -> str:
+    """判断当前为宿主机命名空间还是容器视角。"""
+    global _runtime_mode
+    if _runtime_mode is not None:
+        return _runtime_mode
+    mode = "host"
+    try:
+        if os.path.exists("/.dockerenv"):
+            mode = "container"
+        else:
+            cgroup = "/proc/1/cgroup"
+            if os.path.isfile(cgroup):
+                with open(cgroup, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                if any(x in text for x in ("docker", "containerd", "kubepods", "lxc", "podman")):
+                    mode = "container"
+            # 部分环境 cgroup v2 无关键字，再看 mountinfo
+            if mode == "host" and os.path.isfile("/proc/self/mountinfo"):
+                with open("/proc/self/mountinfo", "r", encoding="utf-8", errors="replace") as f:
+                    mi = f.read(4096)
+                if "docker" in mi or "overlay" in mi and "containerd" in mi:
+                    mode = "container"
+    except OSError:
+        pass
+    _runtime_mode = mode
+    return mode
+
+
+def hostname_display(raw: str, runtime: str) -> str:
+    """容器短 ID 主机名转为可读展示。"""
+    raw = raw or "unknown"
+    if runtime != "container":
+        return raw
+    if re.fullmatch(r"[0-9a-fA-F]{8,64}", raw):
+        return f"容器 {raw[:12].lower()}"
+    return f"容器 · {raw}"
 
 
 def _level_ok(level: str) -> str:
@@ -330,8 +385,13 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
 
     collect_ms = (time.perf_counter() - t0) * 1000.0
 
+    raw_host = socket.gethostname()
+    runtime = detect_runtime()
+    load_per_core = round(load1 / max(logical, 1), 2)
     data = {
-        "hostname": socket.gethostname(),
+        "hostname": raw_host,
+        "hostname_display": hostname_display(raw_host, runtime),
+        "runtime": runtime,
         "os_name": os_name,
         "os_version": os_version,
         "kernel": platform.release(),
@@ -344,6 +404,8 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "load_1": round(load1, 2),
         "load_5": round(load5, 2),
         "load_15": round(load15, 2),
+        "load_per_core": load_per_core,
+        "load_status": _status_from_pct(min(load_per_core * 100.0, 100.0)),
         "memory_total": mem_total,
         "memory_used": mem_used,
         "memory_available": mem_available,
@@ -358,6 +420,8 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "disk_free": disk_free,
         "disk_percent": round(disk_percent, 1),
         "disk_status": _status_from_pct(disk_percent),
+        "disk_mount": "/",
+        "disk_label": "磁盘 /（根分区）",
         "boot_time": datetime.fromtimestamp(boot_ts).astimezone().isoformat(timespec="seconds"),
         "uptime_seconds": uptime_sec,
         "users": users,
@@ -366,6 +430,7 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "net_bytes_recv": net_recv,
         "net_up_rate": round(up_rate, 1),
         "net_down_rate": round(down_rate, 1),
+        "timezone": _tz_label(),
     }
 
     # 告警事件（状态边沿 + 限频）
@@ -448,7 +513,7 @@ def _parse_rtt_ms(stdout: str) -> Optional[float]:
 
 def ping_once(host: str) -> Tuple[bool, Optional[float], str]:
     """
-    对单个目标执行一次 ping。
+    对单个目标执行一次 ICMP ping。
     返回 (success, rtt_ms, detail)
     """
     if not _detect_ping():
@@ -467,7 +532,7 @@ def ping_once(host: str) -> Tuple[bool, Optional[float], str]:
             rtt = _parse_rtt_ms(out)
             if rtt is None:
                 rtt = 0.0
-            return True, rtt, "ok"
+            return True, rtt, "icmp"
         return False, None, "timeout_or_unreachable"
     except subprocess.TimeoutExpired:
         return False, None, "timeout"
@@ -475,6 +540,37 @@ def ping_once(host: str) -> Tuple[bool, Optional[float], str]:
         return False, None, "ping_not_found"
     except OSError:
         return False, None, "os_error"
+
+
+def tcp_probe_ms(host: str, port: int = 443) -> Tuple[bool, Optional[float], str]:
+    """固定端口 TCP 连接探测（不执行 shell），作为 ICMP 失败时的回退。"""
+    t0 = time.perf_counter()
+    try:
+        # 禁止把用户输入拼进命令；此处 host 仅来自内置列表
+        with socket.create_connection((host, port), timeout=TCP_TIMEOUT):
+            rtt = (time.perf_counter() - t0) * 1000.0
+            return True, round(rtt, 2), "tcp443"
+    except (socket.timeout, TimeoutError):
+        return False, None, "tcp_timeout"
+    except OSError:
+        return False, None, "tcp_unreachable"
+
+
+def probe_target(host: str) -> Tuple[bool, Optional[float], str]:
+    """先 ICMP，失败则 TCP/443 回退；无 ping 时直接 TCP。"""
+    has_ping = _detect_ping()
+    if has_ping:
+        ok, rtt, detail = ping_once(host)
+        if ok:
+            return ok, rtt, detail
+        ok2, rtt2, detail2 = tcp_probe_ms(host, 443)
+        if ok2:
+            return True, rtt2, detail2
+        return False, None, detail
+    ok2, rtt2, detail2 = tcp_probe_ms(host, 443)
+    if ok2:
+        return True, rtt2, detail2
+    return False, None, "ping_not_found_tcp_fail"
 
 
 def _latency_status(avg: Optional[float], loss: float, online: bool) -> str:
@@ -488,7 +584,7 @@ def _latency_status(avg: Optional[float], loss: float, online: bool) -> str:
 
 
 def run_ping_round() -> None:
-    """并发 Ping 全部目标，更新缓存与事件。"""
+    """并发探测全部目标，更新缓存与事件。"""
     global _ping_available, _ping_updated_at
 
     available = _detect_ping()
@@ -496,30 +592,16 @@ def run_ping_round() -> None:
         _ping_available = available
 
     if not available:
-        add_event("ERROR", "系统未安装 ping，网络延迟检测不可用", dedup_key="ping_missing")
-        with _state_lock:
-            for t in PING_TARGETS:
-                tid = t["id"]
-                _ping_results[tid] = {
-                    "id": tid,
-                    "name": t["name"],
-                    "host": t["host"],
-                    "online": False,
-                    "current_ms": None,
-                    "min_ms": None,
-                    "max_ms": None,
-                    "avg_ms": None,
-                    "loss_percent": 100.0,
-                    "status": "unavailable",
-                    "last_check": _now_iso(),
-                    "detail": "ping_not_installed",
-                }
-            _ping_updated_at = time.time()
-        return
+        # 无 ping 命令时仍可用 TCP 回退，仅提示一次
+        add_event(
+            "WARN",
+            "未安装 ping，已改用 TCP/443 探测（部分目标可能不准）",
+            dedup_key="ping_missing_tcp",
+        )
 
-    def _job(target: Dict[str, str]) -> Tuple[str, bool, Optional[float], str]:
-        ok, rtt, detail = ping_once(target["host"])
-        return target["id"], ok, rtt, detail
+    def _job(target: Dict[str, Any]) -> Tuple[str, bool, Optional[float], str]:
+        ok, rtt, detail = probe_target(str(target["host"]))
+        return str(target["id"]), ok, rtt, detail
 
     results: Dict[str, Tuple[bool, Optional[float], str]] = {}
     workers = max(4, min(16, len(PING_TARGETS)))
@@ -536,8 +618,10 @@ def run_ping_round() -> None:
     now_iso = _now_iso()
     with _state_lock:
         for t in PING_TARGETS:
-            tid = t["id"]
+            tid = str(t["id"])
             ok, rtt, detail = results.get(tid, (False, None, "error"))
+            soft = bool(t.get("soft_alert"))
+            group = str(t.get("group") or "web")
             hist = _ping_history[tid]
             if ok and rtt is not None:
                 hist.append(rtt)
@@ -561,17 +645,24 @@ def run_ping_round() -> None:
             if prev is False and online:
                 add_event("OK", f"{t['name']} ({t['host']}) 已恢复在线", dedup_key=f"up_{tid}")
             elif prev is True and not online:
-                add_event("WARN", f"{t['name']} ({t['host']}) 连接超时或不可达", dedup_key=f"down_{tid}")
-            elif online and current is not None and current >= DANGER_LATENCY_MS:
+                add_event(
+                    "WARN",
+                    f"{t['name']} ({t['host']}) 不可达",
+                    dedup_key=f"down_{tid}",
+                )
+            elif (not soft) and online and current is not None and current >= DANGER_LATENCY_MS:
                 add_event("WARN", f"{t['name']} 延迟过高: {current:.1f} ms", dedup_key=f"lat_{tid}")
-            elif loss >= WARN_LOSS:
-                add_event("WARN", f"{t['name']} 丢包率异常: {loss:.1f}%", dedup_key=f"loss_{tid}")
+            elif (not soft) and loss >= WARN_LOSS and not online:
+                # 持续不可达时的丢包汇总，软目标不刷
+                add_event("WARN", f"{t['name']} 丢包率偏高: {loss:.1f}%", dedup_key=f"loss_{tid}")
 
             _ping_prev_online[tid] = online
             _ping_results[tid] = {
                 "id": tid,
                 "name": t["name"],
                 "host": t["host"],
+                "group": group,
+                "soft_alert": soft,
                 "online": online,
                 "current_ms": current,
                 "min_ms": min_ms,
@@ -583,9 +674,6 @@ def run_ping_round() -> None:
                 "detail": detail,
             }
         _ping_updated_at = time.time()
-
-    # 与 metrics 一样走限频，避免每轮刷屏
-    add_event("INFO", "Ping 检测完成", dedup_key="ping_done")
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +720,8 @@ def start_workers() -> None:
         if _workers_started:
             return
         _workers_started = True
-        add_event("OK", f"探针服务启动 v{VERSION}", dedup_key="boot")
+        rt = detect_runtime()
+        add_event("OK", f"探针服务启动 v{VERSION}（{('容器' if rt == 'container' else '宿主机')}模式）", dedup_key="boot")
         # 启动时先同步采一次，避免空数据
         try:
             data, cms = collect_metrics()
@@ -667,6 +756,8 @@ def build_status_payload() -> Dict[str, Any]:
                         "id": t["id"],
                         "name": t["name"],
                         "host": t["host"],
+                        "group": t.get("group") or "web",
+                        "soft_alert": bool(t.get("soft_alert")),
                         "online": False,
                         "current_ms": None,
                         "min_ms": None,
@@ -678,9 +769,12 @@ def build_status_payload() -> Dict[str, Any]:
                         "detail": "pending",
                     }
                 )
+        runtime = detect_runtime()
         payload = {
             "ok": True,
             "version": VERSION,
+            "runtime": runtime,
+            "timezone": _tz_label(),
             "server_time": _now_iso(),
             "uptime_seconds": int(time.time() - _start_time),
             "collect_ms": round(_metrics_collect_ms, 2),
@@ -693,11 +787,22 @@ def build_status_payload() -> Dict[str, Any]:
             "system": dict(_metrics) if _metrics else {},
             "ping": {
                 "available": bool(_ping_available) if _ping_available is not None else None,
+                "icmp_available": bool(_ping_available) if _ping_available is not None else None,
+                "tcp_fallback": True,
                 "targets": targets,
             },
             "events": list(_events)[:EVENT_MAX],
         }
     return payload
+
+
+def _cached_html() -> Tuple[bytes, str]:
+    """首页 HTML 缓存 + 弱 ETag，减轻重复传输。"""
+    global _html_body, _html_etag
+    if _html_body is None or _html_etag is None:
+        _html_body = INDEX_HTML.encode("utf-8")
+        _html_etag = '"' + hashlib.sha256(_html_body).hexdigest()[:16] + '"'
+    return _html_body, _html_etag
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +813,14 @@ class ProbeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # 简洁访问日志到 stdout
-        print(f"[{_now_iso()}] {self.address_string()} {fmt % args}")
+        # 轮询/健康检查降噪，避免刷屏与磁盘 I/O
+        try:
+            msg = fmt % args if args else str(fmt)
+        except Exception:
+            msg = str(fmt)
+        if " /api/status" in msg or " /health" in msg:
+            return
+        print(f"[{_now_iso()}] {self.address_string()} {msg}")
 
     def _send_json(self, code: int, obj: Dict[str, Any]) -> None:
         body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -724,13 +835,21 @@ class ProbeHandler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
 
-    def _send_html(self, code: int, html: str) -> None:
-        body = html.encode("utf-8")
+    def _send_html_cached(self) -> None:
+        body, etag = _cached_html()
+        inm = self.headers.get("If-None-Match")
         try:
-            self.send_response(code)
+            if inm and inm.strip() == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "public, max-age=30")
+                self.end_headers()
+                return
+            self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=30")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
@@ -741,7 +860,7 @@ class ProbeHandler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/":
-                self._send_html(200, INDEX_HTML)
+                self._send_html_cached()
             elif path == "/api/status":
                 try:
                     payload = build_status_payload()
@@ -753,13 +872,16 @@ class ProbeHandler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "internal_error", "version": VERSION},
                     )
             elif path == "/health":
-                # 仅必要状态 + 版本，便于远程部署验收
+                with _state_lock:
+                    ping_av = _ping_available
                 self._send_json(
                     200,
                     {
                         "status": "ok",
                         "version": VERSION,
                         "uptime_seconds": int(time.time() - _start_time),
+                        "runtime": detect_runtime(),
+                        "ping_available": bool(ping_av) if ping_av is not None else None,
                     },
                 )
             else:
@@ -1116,6 +1238,72 @@ footer.status-bar strong {
   padding: 2px 8px;
   letter-spacing: 0.04em;
 }
+.mode-chip {
+  font-size: 10px;
+  margin-left: 6px;
+  color: var(--warn);
+  border: 1px solid rgba(255,204,0,0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.mode-chip.host { color: var(--ok); border-color: rgba(0,255,106,0.35); }
+.toolbar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(0,255,106,0.2);
+  background: rgba(0, 12, 6, 0.4);
+  border-radius: 4px;
+}
+.toolbar label {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--dim); font-size: 11px; cursor: pointer; user-select: none;
+}
+.toolbar select {
+  font-family: var(--font); font-size: 11px;
+  color: var(--text);
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(0,255,106,0.3);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+.toolbar .hint { color: var(--dim); font-size: 10px; margin-left: auto; }
+.ping-groups { display: flex; flex-direction: column; gap: 12px; }
+.ping-group h3 {
+  font-size: 11px; color: var(--ok); letter-spacing: 0.08em;
+  margin-bottom: 6px; font-weight: normal;
+}
+.ping-cards {
+  display: none;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.ping-card {
+  border: 1px solid rgba(0,255,106,0.18);
+  background: rgba(0,0,0,0.22);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 11px;
+}
+.ping-card .name { color: var(--text); margin-bottom: 2px; }
+.ping-card .host { color: var(--dim); font-size: 10px; margin-bottom: 6px; word-break: break-all; }
+.ping-card .ms { font-size: 16px; color: var(--ok); }
+.ping-card .meta { color: var(--dim); margin-top: 4px; font-size: 10px; }
+.ping-card.offline .ms { color: var(--offline); }
+.ping-card.warn .ms { color: var(--warn); }
+.ping-card.danger .ms { color: var(--danger); }
+@media (max-width: 960px) {
+  .ping-table-wrap { display: none; }
+  .ping-cards { display: grid; }
+}
+body[data-theme="tower"] .ping-table-wrap { display: none; }
+body[data-theme="tower"] .ping-cards { display: grid; }
+.event-filters { display: inline-flex; gap: 6px; align-items: center; }
+.v-long {
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
 
 /* ---- 竖向居中滚动主题 ----
    中间半透明卡片；两侧强化矩阵数字雨 */
@@ -1251,21 +1439,34 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   </header>
   <div id="errBanner" class="err-banner">与后端连接异常，正在重试并保留最后成功数据…</div>
 
+  <div class="toolbar" id="toolbar">
+    <label title="关闭可进一步降低卡顿"><input type="checkbox" id="rainToggle" checked /> 背景动画</label>
+    <label class="event-filters">事件
+      <select id="eventFilter" title="过滤事件等级">
+        <option value="all">全部</option>
+        <option value="warn" selected>告警+</option>
+        <option value="error">仅错误</option>
+      </select>
+    </label>
+    <span class="hint" id="runtimeHint">运行模式检测中…</span>
+  </div>
+
   <div class="grid">
     <section class="panel" id="sysPanel">
-      <h2>01 // 系统性能</h2>
+      <h2>01 // 系统性能 <span class="mode-chip host" id="runtimeChip" style="display:none"></span></h2>
       <div class="kv" id="sysKv"></div>
       <div class="meter" id="sysMeters"></div>
     </section>
 
     <section class="panel" id="pingPanel">
-      <h2 id="pingTitle">02 // 外部 Ping</h2>
-      <div class="scroll-x">
+      <h2 id="pingTitle">02 // 外部探测</h2>
+      <div class="ping-groups" id="pingGroups"></div>
+      <div class="scroll-x ping-table-wrap">
         <table class="ping-table">
           <thead>
             <tr>
-              <th>目标</th><th>主机</th><th>当前</th><th>最低</th><th>最高</th>
-              <th>平均</th><th>丢包</th><th>状态</th><th>检测时间</th>
+              <th>分组</th><th>目标</th><th>主机</th><th>当前</th><th>最低</th><th>最高</th>
+              <th>平均</th><th>丢包</th><th>状态</th><th>方式</th><th>检测时间</th>
             </tr>
           </thead>
           <tbody id="pingBody"></tbody>
@@ -1288,7 +1489,8 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     <span class="f-item" title="服务端采集系统指标耗时">采集 <strong id="fCollect">—</strong> ms</span>
     <span class="f-item" title="系统指标距上次采集已过秒数">指标距今 <strong id="fAge">—</strong> s</span>
     <span class="f-item" title="Ping 结果距上次检测已过秒数">探测距今 <strong id="fPingAge">—</strong> s</span>
-    <span class="f-item" title="服务端最近一次成功返回时间">更新于 <strong id="fUpdated">—</strong></span>
+    <span class="f-item" title="服务端最近一次成功返回时间（服务端时区）">更新于 <strong id="fUpdated">—</strong></span>
+    <span class="f-item" title="服务端时区；日期/时间为浏览器本地时区">时区 <strong id="fTz">—</strong></span>
     <span class="f-item" title="与后端连接状态">状态 <strong id="fStatus">—</strong></span>
     <span class="f-item" title="探针服务持续运行时间">服务运行 <strong id="fUptime">—</strong></span>
     <span class="f-item" title="探针版本">v<strong id="fVer">—</strong></span>
@@ -1310,11 +1512,25 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var serviceUptimeBase = 0;
   var serviceUptimeAt = 0;
   var THEME_KEY = "vps-probe-theme";
+  var RAIN_KEY = "vps-probe-rain";
+  var EVENT_FILTER_KEY = "vps-probe-event-filter";
   var reducedMotion = false;
+  var rainEnabled = true;
+  var eventFilter = "warn";
+  var lastEventsRaw = [];
   var rainRaf = 0;
   var resizeTimer = 0;
   try {
     reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  } catch (e) {}
+  try {
+    var rs = localStorage.getItem(RAIN_KEY);
+    if (rs === "0") rainEnabled = false;
+    if (rs === "1") rainEnabled = true;
+  } catch (e) {}
+  try {
+    var ef = localStorage.getItem(EVENT_FILTER_KEY);
+    if (ef === "all" || ef === "warn" || ef === "error") eventFilter = ef;
   } catch (e) {}
 
   function $(id) { return document.getElementById(id); }
@@ -1325,6 +1541,28 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       if (t === "tower" || t === "dashboard") return t;
     } catch (e) {}
     return "dashboard";
+  }
+
+  function setRainEnabled(on) {
+    rainEnabled = !!on;
+    try { localStorage.setItem(RAIN_KEY, rainEnabled ? "1" : "0"); } catch (e) {}
+    var tg = $("rainToggle");
+    if (tg) tg.checked = rainEnabled;
+    if (!rainEnabled || reducedMotion) {
+      stopRainLoop();
+      if (canvas && ctx) {
+        try {
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#020604";
+          ctx.fillRect(0, 0, canvas.width || 1, canvas.height || 1);
+        } catch (e) {}
+      }
+      if (canvas) canvas.style.opacity = "0";
+    } else {
+      if (canvas) canvas.style.opacity = "";
+      resizeRain();
+      if (document.visibilityState === "visible") startRainLoop();
+    }
   }
 
   function applyTheme(theme) {
@@ -1421,17 +1659,24 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       lastSysSig = "";
       return;
     }
-    // 界面不展示：系统版本 / 架构 / 物理核心 / 逻辑核心（后端 API 仍可能包含）
+    var hostShow = sys.hostname_display || sys.hostname || "—";
+    var diskLabel = sys.disk_label || "磁盘 /（根分区）";
+    var cpuModel = sys.cpu_model || "—";
+    var loadLine = [sys.load_1, sys.load_5, sys.load_15].join(" / ");
+    if (sys.load_per_core != null) {
+      loadLine += "（每核 " + sys.load_per_core + "）";
+    }
+    // 界面不展示：系统版本 / 架构 / 物理核心 / 逻辑核心
     var items = [
-      ["主机名", sys.hostname],
+      ["主机名", hostShow],
       ["操作系统", sys.os_name],
       ["内核", sys.kernel],
-      ["CPU 型号", sys.cpu_model],
-      ["负载 1/5/15", [sys.load_1, sys.load_5, sys.load_15].join(" / ")],
+      ["CPU 型号", cpuModel],
+      ["负载 1/5/15", loadLine],
       ["内存", fmtBytes(sys.memory_used) + " / " + fmtBytes(sys.memory_total)],
       ["可用内存", fmtBytes(sys.memory_available)],
       ["Swap", fmtBytes(sys.swap_used) + " / " + fmtBytes(sys.swap_total)],
-      ["磁盘 /", fmtBytes(sys.disk_used) + " / " + fmtBytes(sys.disk_total)],
+      [diskLabel, fmtBytes(sys.disk_used) + " / " + fmtBytes(sys.disk_total)],
       ["磁盘可用", fmtBytes(sys.disk_free)],
       ["启动时间", sys.boot_time],
       ["持续运行", fmtUptime(sys.uptime_seconds)],
@@ -1443,11 +1688,13 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       ["下载速率", fmtRate(sys.net_down_rate)]
     ];
     var sig = items.map(function (it) { return it[0] + "=" + it[1]; }).join("|") +
-      "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent;
+      "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent +
+      "|" + (sys.runtime || "");
     if (sig === lastSysSig) return;
     lastSysSig = sig;
     $("sysKv").innerHTML = items.map(function (it) {
-      return '<div class="item"><span class="k">' + esc(it[0]) + '</span><span class="v">' + esc(it[1]) + '</span></div>';
+      var longCls = (it[0] === "CPU 型号" || String(it[1]).length > 28) ? ' class="v v-long" title="' + esc(it[1]) + '"' : ' class="v"';
+      return '<div class="item"><span class="k">' + esc(it[0]) + '</span><span' + longCls + '>' + esc(it[1]) + '</span></div>';
     }).join("");
     $("sysMeters").innerHTML =
       meterHtml("CPU", sys.cpu_percent, sys.cpu_status) +
@@ -1456,33 +1703,43 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       meterHtml("磁盘", sys.disk_percent, sys.disk_status);
   }
 
+  function methodLabel(detail) {
+    if (!detail) return "—";
+    if (detail === "icmp" || detail === "ok") return "ICMP";
+    if (detail === "tcp443") return "TCP443";
+    if (String(detail).indexOf("tcp") === 0) return "TCP";
+    if (detail === "pending") return "等待";
+    return "—";
+  }
+
   function renderPing(ping) {
     var body = $("pingBody");
+    var groupsEl = $("pingGroups");
     if (!ping) {
-      body.innerHTML = '<tr><td colspan="9">等待数据…</td></tr>';
+      body.innerHTML = '<tr><td colspan="11">等待数据…</td></tr>';
+      if (groupsEl) groupsEl.innerHTML = "";
       lastPingSig = "";
-      return;
-    }
-    if (ping.available === false) {
-      body.innerHTML = '<tr><td colspan="9" class="st danger">系统未安装 ping，延迟检测不可用</td></tr>';
-      lastPingSig = "unavailable";
       return;
     }
     var targets = ping.targets || [];
     if ($("pingTitle")) {
       var onlineN = targets.filter(function (t) { return t.online; }).length;
-      $("pingTitle").textContent = "02 // 外部 Ping · " + onlineN + "/" + targets.length + " 在线";
+      var mode = ping.icmp_available === false ? "（TCP 回退）" : "";
+      $("pingTitle").textContent = "02 // 外部探测 · " + onlineN + "/" + targets.length + " 在线" + mode;
     }
     var sig = targets.map(function (t) {
-      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.last_check].join(":");
+      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.detail, t.last_check].join(":");
     }).join("|");
     if (sig === lastPingSig) return;
     lastPingSig = sig;
+
+    var ms = function (v) { return v != null ? Number(v).toFixed(1) : "—"; };
     var rows = targets.map(function (t) {
       var st = t.status || (t.online ? "ok" : "offline");
-      var stLabel = t.online ? "在线" : (st === "unavailable" ? "不可用" : (st === "pending" ? "等待" : "离线"));
-      var ms = function (v) { return v != null ? Number(v).toFixed(1) : "—"; };
+      var stLabel = t.online ? "在线" : (st === "unavailable" ? "不可用" : (st === "pending" ? "等待" : "不可达"));
+      var g = t.group === "dns" ? "DNS" : "网站";
       return "<tr>" +
+        "<td>" + esc(g) + "</td>" +
         "<td>" + esc(t.name) + "</td>" +
         '<td class="host" title="' + esc(t.host) + '">' + esc(t.host) + "</td>" +
         "<td>" + esc(t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : "—") + "</td>" +
@@ -1491,16 +1748,53 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         "<td>" + esc(ms(t.avg_ms)) + "</td>" +
         "<td>" + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(1) + "%" : "—") + "</td>" +
         '<td class="st ' + esc(st) + '">' + esc(stLabel) + "</td>" +
+        "<td>" + esc(methodLabel(t.detail)) + "</td>" +
         "<td title=\"" + esc(t.last_check || "") + "\">" + esc(compactTime(t.last_check)) + "</td>" +
         "</tr>";
     });
-    body.innerHTML = rows.join("") || '<tr><td colspan="9">无目标</td></tr>';
+    body.innerHTML = rows.join("") || '<tr><td colspan="11">无目标</td></tr>';
+
+    if (groupsEl) {
+      var buckets = { dns: [], web: [] };
+      targets.forEach(function (t) {
+        var g = t.group === "dns" ? "dns" : "web";
+        buckets[g].push(t);
+      });
+      var html = ["dns", "web"].map(function (g) {
+        var title = g === "dns" ? "DNS" : "网站";
+        var cards = buckets[g].map(function (t) {
+          var st = t.status || (t.online ? "ok" : "offline");
+          var cls = "ping-card " + (t.online ? (st === "warn" || st === "danger" ? st : "ok") : "offline");
+          var cur = t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : (t.online ? "—" : "不可达");
+          return '<div class="' + cls + '"><div class="name">' + esc(t.name) + '</div>' +
+            '<div class="host">' + esc(t.host) + '</div>' +
+            '<div class="ms">' + esc(cur) + '</div>' +
+            '<div class="meta">丢包 ' + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(0) + "%" : "—") +
+            " · " + esc(methodLabel(t.detail)) + "</div></div>";
+        }).join("");
+        return '<div class="ping-group"><h3>' + title + '</h3><div class="ping-cards">' + cards + "</div></div>";
+      }).join("");
+      groupsEl.innerHTML = html;
+    }
+  }
+
+  function filterEvents(list) {
+    list = list || [];
+    if (eventFilter === "all") return list;
+    if (eventFilter === "error") {
+      return list.filter(function (e) { return e.level === "ERROR"; });
+    }
+    // warn+：WARN / ERROR / OK（恢复）
+    return list.filter(function (e) {
+      return e.level === "WARN" || e.level === "ERROR" || e.level === "OK";
+    });
   }
 
   function renderEvents(events) {
     var term = $("term");
-    var list = events || [];
-    var sig = list.map(function (e) { return e.ts + e.level + e.message; }).join("|");
+    lastEventsRaw = events || [];
+    var list = filterEvents(lastEventsRaw);
+    var sig = eventFilter + "|" + list.map(function (e) { return e.ts + e.level + e.message; }).join("|");
     if (sig === lastEventsSig && term.childNodes.length) return;
     lastEventsSig = sig;
     var nearBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 48;
@@ -1509,6 +1803,9 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         '<span class="lv ' + esc(e.level) + '">' + esc(e.level) + '</span>' +
         '<span class="msg">' + esc(e.message) + '</span></div>';
     }).join("");
+    if (!list.length) {
+      html = '<div class="term-line"><span class="ts">#</span><span class="msg"> 当前过滤下无事件</span></div>';
+    }
     term.innerHTML = html + '<div class="term-line"><span class="ts">$</span> <span class="cursor"></span></div>';
     if (nearBottom || term.scrollTop === 0) {
       term.scrollTop = term.scrollHeight;
@@ -1531,20 +1828,53 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
   }
 
+  function applyRuntimeUi(data) {
+    var runtime = data.runtime || (data.system && data.system.runtime) || "";
+    var chip = $("runtimeChip");
+    var hint = $("runtimeHint");
+    if (chip) {
+      if (runtime === "container") {
+        chip.style.display = "inline";
+        chip.className = "mode-chip";
+        chip.textContent = "容器视角";
+        chip.title = "Docker/容器内指标，不等于完整宿主机";
+      } else if (runtime === "host") {
+        chip.style.display = "inline";
+        chip.className = "mode-chip host";
+        chip.textContent = "宿主机";
+        chip.title = "直接运行在宿主机命名空间";
+      } else {
+        chip.style.display = "none";
+      }
+    }
+    if (hint) {
+      if (runtime === "container") {
+        hint.textContent = "容器模式：主机名多为容器 ID；指标为容器视角";
+      } else if (runtime === "host") {
+        hint.textContent = "宿主机模式 · 日期/时间为浏览器本地时区";
+      } else {
+        hint.textContent = "日期/时间为浏览器本地时区 · 更新于为服务端时间";
+      }
+    }
+  }
+
   function applyPayload(data, reqMs) {
     lastOk = data;
     serviceUptimeBase = data.uptime_seconds || 0;
     serviceUptimeAt = Date.now();
     $("fVer").textContent = data.version || "—";
     if ($("hdrVer")) $("hdrVer").textContent = "v" + (data.version || "—");
-    if (data.system && data.system.hostname) {
-      document.title = "VPS Probe · " + data.system.hostname;
-    }
+    var disp = (data.system && (data.system.hostname_display || data.system.hostname)) || "";
+    if (disp) document.title = "VPS Probe · " + disp;
+    applyRuntimeUi(data);
     $("fCollect").textContent = data.collect_ms != null ? Number(data.collect_ms).toFixed(1) : "—";
     $("fReq").textContent = reqMs != null ? reqMs.toFixed(1) : "—";
     $("fAge").textContent = data.metrics_age_seconds != null ? Number(data.metrics_age_seconds).toFixed(1) : "—";
     if ($("fPingAge")) {
       $("fPingAge").textContent = data.ping_age_seconds != null ? Number(data.ping_age_seconds).toFixed(1) : "—";
+    }
+    if ($("fTz")) {
+      $("fTz").textContent = data.timezone || (data.system && data.system.timezone) || "—";
     }
     // 压缩时间戳展示，避免底栏单行过长被裁切
     var st = data.server_time || "—";
@@ -1552,7 +1882,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       st = st.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "").replace(/Z$/, "");
     }
     $("fUpdated").textContent = st;
-    renderSystem(data.system);
+    renderSystem(data.system || {});
     renderPing(data.ping);
     renderEvents(data.events);
   }
@@ -1666,13 +1996,13 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   }
 
   function startRainLoop() {
-    if (reducedMotion || !ctx || rainRaf) return;
+    if (reducedMotion || !rainEnabled || !ctx || rainRaf) return;
     rainRaf = requestAnimationFrame(drawRain);
   }
 
   function drawRain(ts) {
     rainRaf = 0;
-    if (reducedMotion || !ctx) return;
+    if (reducedMotion || !ctx || !rainEnabled) return;
     if (!rainActive) return; /* 页不可见时彻底停环，不空转 rAF */
     if (ts - lastFrame < frameGap) {
       rainRaf = requestAnimationFrame(drawRain);
@@ -1737,7 +2067,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   });
   window.addEventListener("resize", scheduleResizeRain);
 
-  // 主题：读取本地偏好并绑定切换（纯前端，无配置文件）
+  // 主题 / 工具栏：本地偏好，无配置文件
   applyTheme(getTheme());
   var themeBtn = $("themeBtn");
   if (themeBtn) {
@@ -1753,7 +2083,28 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       setTimeout(function () { refreshBtn.classList.remove("busy"); }, 400);
     });
   }
-  // 快捷键：T 主题 / R 刷新（本页无输入框）
+  var rainToggle = $("rainToggle");
+  if (rainToggle) {
+    rainToggle.checked = rainEnabled && !reducedMotion;
+    if (reducedMotion) {
+      rainToggle.disabled = true;
+      rainToggle.parentElement && (rainToggle.parentElement.title = "系统已开启「减少动态效果」");
+    }
+    rainToggle.addEventListener("change", function () {
+      setRainEnabled(rainToggle.checked);
+    });
+  }
+  var eventFilterEl = $("eventFilter");
+  if (eventFilterEl) {
+    eventFilterEl.value = eventFilter;
+    eventFilterEl.addEventListener("change", function () {
+      eventFilter = eventFilterEl.value || "warn";
+      try { localStorage.setItem(EVENT_FILTER_KEY, eventFilter); } catch (e) {}
+      lastEventsSig = "";
+      renderEvents(lastEventsRaw);
+    });
+  }
+  // 快捷键：T 主题 / R 刷新 / A 动画开关
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     var tag = (ev.target && ev.target.tagName) || "";
@@ -1762,14 +2113,17 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       toggleTheme();
     } else if (ev.key === "r" || ev.key === "R") {
       poll();
+    } else if (ev.key === "a" || ev.key === "A") {
+      if (!reducedMotion) setRainEnabled(!rainEnabled);
     }
   });
 
-  if (!reducedMotion) {
+  if (!reducedMotion && rainEnabled) {
     resizeRain();
     startRainLoop();
   } else if (canvas) {
-    canvas.style.display = "none";
+    if (reducedMotion) canvas.style.display = "none";
+    else canvas.style.opacity = "0";
   }
   tickClock();
   clockTimer = setInterval(tickClock, 1000);

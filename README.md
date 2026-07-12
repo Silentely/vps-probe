@@ -43,27 +43,30 @@
 
 | 区域 | 内容 |
 |------|------|
-| **系统性能** | 主机名、操作系统、内核、CPU 型号、使用率与负载、内存 / Swap / 磁盘、启动与运行时间、用户数、进程数、网络累计流量与实时速率（界面不展示系统版本 / 架构 / 物理·逻辑核心） |
-| **外部 Ping** | 14 个内置目标（公共 DNS、国内 DNS、主流站点）；并发检测延迟、丢包、在线状态与历史统计 |
-| **事件终端** | 只读模拟终端：启动、采集、告警与恢复等事件（不可输入、不执行命令） |
+| **系统性能** | 主机名（容器自动美化）、运行模式、操作系统、内核、CPU 型号、使用率与负载、内存 / Swap / 根分区磁盘、启动与运行时间、用户数、进程数、网络流量与速率 |
+| **外部探测** | 14 个内置目标（DNS + 网站分组）；ICMP 优先，失败自动 **TCP/443 回退**；并发延迟 / 丢包 / 在线状态 |
+| **事件终端** | 只读模拟终端；支持全部 / 告警+ / 仅错误过滤（不可输入、不执行命令） |
 
 ### 其它能力
 
 - 使用率 / 延迟阈值着色（约 **80% 警告** / **90% 危险**）
-- **主题切换**：**横向主题**（双栏仪表盘）↔ **竖向主题**（居中滚动 + 两侧矩阵数据流，键值横向排列）
-- 底栏全宽多行芯片展示日期 / 时间 / 延迟 / 在线状态等，避免被裁切
+- **主题切换**：**横向主题** ↔ **竖向主题**（居中滚动 + 两侧矩阵数据流）
+- **背景动画开关**（localStorage 记忆；快捷键 `A`）
+- **宿主机 / 容器视角**自动识别，标题与主机名不再像「乱码容器 ID」
+- 底栏居中：请求耗时、采集耗时、指标/探测距今、服务端时区、在线状态等
 - 后端定时采集并缓存；多浏览器打开 **不会** 重复狂 Ping
-- 异常时页面保留最后一次成功数据，并显示连接状态
+- 首页 HTML 支持 **ETag / 短缓存**；`/api/status` 仍 `no-store`
 
 ---
 
 ## 页面效果
 
-- **风格**：黑客帝国 / 赛博朋克 — 深色背景、荧光绿、半透明卡片与辉光
-- **数字雨**：轻量 Canvas 动画；移动端降密度；页面不可见时暂停
-- **布局**：桌面与手机自适应；底栏居中显示日期时间、请求耗时、采集耗时、指标/探测距今、连接状态、服务运行时间、版本号
+- **风格**：黑客帝国 / 赛博朋克 — 深色背景、荧光绿、半透明卡片
+- **数字雨**：轻量 Canvas；可关闭；移动端降密度；页面不可见时暂停
+- **探测**：桌面表格 + 移动端/竖向主题卡片；DNS / 网站分组
+- **布局**：桌面与手机自适应；底栏居中
 
-> 截图可自行补充到本仓库 `docs/` 或 Issues 中展示。
+> 建议自行截图横向/竖向主题放入 Issues 或 PR 展示。
 
 ---
 
@@ -72,7 +75,7 @@
 | 项目 | 要求 |
 |------|------|
 | Python 直跑 | Python **3.9+**；推荐 Debian 12 / Ubuntu 22.04 等常见 Linux VPS（macOS 可本地预览） |
-| 系统包 | 建议安装 `ping`（Debian/Ubuntu：`iputils-ping`）；未安装时延迟区显示不可用 |
+| 系统包 | 建议安装 `ping`（Debian/Ubuntu：`iputils-ping`）；未安装时自动 **TCP/443 回退** |
 | Docker | Docker 20+ |
 | 权限 | **普通用户即可**，不强制 root |
 
@@ -125,6 +128,15 @@ docker run -d --name vps-probe --restart unless-stopped -p 8080:8080 vps-probe
 ```bash
 docker run -d --name vps-probe --restart unless-stopped -p 50000:8080 vps-probe
 ```
+
+指定容器主机名（避免标题显示随机容器 ID）：
+
+```bash
+docker run -d --name vps-probe --hostname my-vps \
+  --restart unless-stopped -p 8080:8080 vps-probe
+```
+
+> Docker 默认展示 **容器视角** 指标。需要宿主机真实面板请用 Python 直跑。
 
 ---
 
@@ -278,39 +290,59 @@ ss -lntp | grep 8080
 </details>
 
 <details>
-<summary><strong>Ping 全部显示不可用？</strong></summary>
+<summary><strong>标题 / 主机名是一串像 7f693e47aa88 的字符？</strong></summary>
 
-安装 ping：
+这是 **Docker 容器 ID**（容器默认主机名），不是故障。v1.4+ 会显示为「容器 xxxx」并标注 **容器视角**。  
+也可用 `--hostname my-vps` 启动容器，或改用 Python 直跑查看宿主机名。
+</details>
+
+<details>
+<summary><strong>Ping / 探测全部显示不可达？</strong></summary>
+
+优先安装 ping：
 
 ```bash
 sudo apt-get install -y iputils-ping
 ```
 
-Docker 镜像已预装 `iputils-ping`。
+Docker 镜像已预装。即使没有 ping，探针也会尝试 **TCP 443** 回退。  
+部分目标（如 Google）在国内 VPS 上长期不可达属网络环境问题，不一定是探针故障。
+</details>
+
+<details>
+<summary><strong>日期时间和「更新于」对不上？</strong></summary>
+
+- **日期 / 时间**：浏览器本地时区  
+- **更新于 / 时区**：服务端时间（容器内常为 UTC）  
+两者不一致是正常现象。
 </details>
 
 <details>
 <summary><strong>内存 / 磁盘和 htop、df 不完全一致？</strong></summary>
 
-不同工具对 cache / buffer、挂载点统计口径可能不同。本项目使用 `psutil`，磁盘统计根路径 `/`。
+不同工具对 cache / buffer、挂载点统计口径可能不同。本项目使用 `psutil`，磁盘为 **根分区 `/`**。
 </details>
 
 <details>
 <summary><strong>多开浏览器会不会重复狂 Ping？</strong></summary>
 
-不会。Ping 由进程内后台任务定时执行并缓存，HTTP 请求只读缓存。
+不会。探测由进程内后台任务定时执行并缓存，HTTP 请求只读缓存。
 </details>
 
 <details>
-<summary><strong>主题如何切换？会丢吗？</strong></summary>
+<summary><strong>主题 / 动画如何切换？会丢吗？</strong></summary>
 
-页面右上角可在 **仪表盘** 与 **竖向主题** 间切换。偏好保存在浏览器 `localStorage`，刷新后保留。
+- 右上角：**竖向主题 / 横向主题**（快捷键 `T`）  
+- 工具栏：**背景动画** 开关（快捷键 `A`）  
+- 事件过滤：全部 / 告警+ / 仅错误  
+
+偏好保存在浏览器 `localStorage`，刷新后保留。
 </details>
 
 <details>
 <summary><strong>依赖有哪些？</strong></summary>
 
-仅 **`psutil`**（见 `requirements.txt`）。HTTP 服务与并发使用 Python 标准库。
+仅 **`psutil`**（见 `requirements.txt`）。HTTP 服务、并发与 TCP 探测使用 Python 标准库。
 </details>
 
 ---
