@@ -32,12 +32,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 HOST = "0.0.0.0"
 PORT = 8080
 
 METRICS_INTERVAL = 2.0          # 系统指标采集间隔（秒）
-PING_INTERVAL = 10.0            # Ping 调度间隔（秒）
+PING_INTERVAL = 12.0            # Ping 调度间隔（秒）；目标增多后略放宽
 PING_TIMEOUT = 2                # 单次 Ping 超时（秒）
 PING_HISTORY_SIZE = 30          # 每目标保留的延迟样本数
 EVENT_MAX = 100                 # 事件最多保留条数
@@ -50,13 +50,22 @@ DANGER_LATENCY_MS = 300.0
 WARN_LOSS = 20.0
 DANGER_LOSS = 50.0
 
+# 内置 Ping 目标（客户端不可改）；覆盖公共 DNS / 云厂商 / 常见站点
 PING_TARGETS: List[Dict[str, str]] = [
     {"id": "cf_dns", "name": "Cloudflare DNS", "host": "1.1.1.1"},
+    {"id": "cf_dns2", "name": "Cloudflare DNS2", "host": "1.0.0.1"},
     {"id": "google_dns", "name": "Google DNS", "host": "8.8.8.8"},
+    {"id": "google_dns2", "name": "Google DNS2", "host": "8.8.4.4"},
     {"id": "quad9", "name": "Quad9 DNS", "host": "9.9.9.9"},
+    {"id": "ali_dns", "name": "AliDNS", "host": "223.5.5.5"},
+    {"id": "dns114", "name": "114 DNS", "host": "114.114.114.114"},
     {"id": "cf_web", "name": "Cloudflare", "host": "cloudflare.com"},
     {"id": "google_web", "name": "Google", "host": "google.com"},
     {"id": "github", "name": "GitHub", "host": "github.com"},
+    {"id": "baidu", "name": "Baidu", "host": "baidu.com"},
+    {"id": "microsoft", "name": "Microsoft", "host": "microsoft.com"},
+    {"id": "apple", "name": "Apple", "host": "apple.com"},
+    {"id": "amazon", "name": "Amazon", "host": "amazon.com"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -513,7 +522,8 @@ def run_ping_round() -> None:
         return target["id"], ok, rtt, detail
 
     results: Dict[str, Tuple[bool, Optional[float], str]] = {}
-    with ThreadPoolExecutor(max_workers=len(PING_TARGETS)) as pool:
+    workers = max(4, min(16, len(PING_TARGETS)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_job, t): t["id"] for t in PING_TARGETS}
         for fut in as_completed(futures):
             try:
@@ -837,8 +847,8 @@ html, body {
   position: relative; z-index: 2;
   min-height: 100%;
   display: flex; flex-direction: column;
-  /* 预留多行底栏高度，避免内容被固定页脚遮挡 */
-  padding: 12px 14px 88px;
+  /* 预留多行底栏 + 安全区，避免被固定页脚遮挡 */
+  padding: 12px 14px calc(108px + env(safe-area-inset-bottom, 0px));
   max-width: 1400px; margin: 0 auto;
   width: 100%;
   box-sizing: border-box;
@@ -987,56 +997,47 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* 底栏：全宽多行芯片布局，禁止横向裁切导致「只看到一半」 */
 footer.bar {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
-  width: 100%;
-  max-width: 100%;
+  width: 100vw;
+  max-width: 100vw;
   box-sizing: border-box;
-  z-index: 5;
-  background: rgba(0, 10, 4, 0.94);
-  border-top: 1px solid rgba(0,255,106,0.35);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  padding: 8px 12px;
-  /* 全宽换行展示，避免长状态栏被 overflow 裁成半行 */
+  z-index: 50;
+  background: rgba(0, 8, 4, 0.97);
+  border-top: 1px solid rgba(0,255,106,0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  gap: 4px 10px;
+  justify-content: flex-start;
+  gap: 6px 8px;
   font-size: 11px;
   color: var(--dim);
-  line-height: 1.5;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
+  line-height: 1.35;
+  overflow: visible;
 }
-footer.bar > span {
-  flex: 0 1 auto;
+footer.bar .f-item {
+  flex: 0 0 auto;
   white-space: nowrap;
-  max-width: 100%;
+  background: rgba(0, 24, 10, 0.55);
+  border: 1px solid rgba(0,255,106,0.18);
+  border-radius: 4px;
+  padding: 3px 8px;
 }
 footer.bar strong {
   color: var(--text);
   font-weight: normal;
-  word-break: break-all;
-}
-footer.bar .sep {
-  opacity: 0.35;
-  flex: 0 0 auto;
-  user-select: none;
 }
 @media (max-width: 720px) {
-  footer.bar {
-    font-size: 10px;
-    gap: 3px 8px;
-    padding: 8px 10px;
-    justify-content: flex-start;
-  }
-  .wrap { padding-bottom: 96px; }
+  footer.bar { font-size: 10px; gap: 5px 6px; padding: 8px; }
+  footer.bar .f-item { padding: 3px 6px; }
+  .wrap { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
 }
 .err-banner {
   display: none;
@@ -1087,23 +1088,35 @@ footer.bar .sep {
 }
 
 /* ---- 竖向居中滚动主题 ----
-   整页单列居中可滚动；键值对保持「参数 | 值」横向排列 */
+   中间内容卡片；两侧露出矩阵数字雨（#rain 全屏，中心半透明遮罩由 JS 绘制） */
 body[data-theme="tower"] {
   overflow-x: hidden;
   overflow-y: auto;
 }
+body[data-theme="tower"] #rain {
+  opacity: 0.42;
+  z-index: 0;
+}
+body[data-theme="tower"] .scanlines {
+  opacity: 0.85;
+}
 body[data-theme="tower"] .wrap {
   max-width: 520px;
+  width: min(520px, calc(100% - 28px));
   margin: 0 auto;
   min-height: 100%;
-  padding: 16px 14px 100px;
+  padding: 16px 14px calc(120px + env(safe-area-inset-bottom, 0px));
   align-items: stretch;
+  /* 中心面板略提亮，两侧靠数字雨衬托 */
+  position: relative;
+  z-index: 2;
 }
 body[data-theme="tower"] header.app {
   flex-direction: column;
   align-items: center;
   text-align: center;
   gap: 10px;
+  background: rgba(0, 14, 6, 0.88);
 }
 body[data-theme="tower"] header.app h1 {
   font-size: 14px;
@@ -1120,6 +1133,7 @@ body[data-theme="tower"] .grid {
 }
 body[data-theme="tower"] .panel {
   width: 100%;
+  background: rgba(0, 16, 8, 0.9);
 }
 body[data-theme="tower"] .terminal {
   grid-column: auto;
@@ -1170,10 +1184,13 @@ body[data-theme="tower"] .ping-table {
   font-size: 10px;
 }
 body[data-theme="tower"] footer.bar {
-  justify-content: center;
+  justify-content: flex-start;
 }
-body[data-theme="tower"] #rain {
-  opacity: 0.14;
+@media (max-width: 640px) {
+  body[data-theme="tower"] .wrap {
+    width: min(100%, calc(100% - 16px));
+  }
+  body[data-theme="tower"] #rain { opacity: 0.28; }
 }
 </style>
 </head>
@@ -1210,7 +1227,7 @@ body[data-theme="tower"] #rain {
     </section>
 
     <section class="panel" id="pingPanel">
-      <h2>02 // 外部 Ping</h2>
+      <h2 id="pingTitle">02 // 外部 Ping</h2>
       <div class="scroll-x">
         <table class="ping-table">
           <thead>
@@ -1231,26 +1248,17 @@ body[data-theme="tower"] #rain {
   </div>
 </div>
 
-<footer class="bar">
-  <span>日期 <strong id="fDate">—</strong></span>
-  <span class="sep">|</span>
-  <span>时间 <strong id="fTime">—</strong></span>
-  <span class="sep">|</span>
-  <span>请求 <strong id="fReq">—</strong> ms</span>
-  <span class="sep">|</span>
-  <span>采集 <strong id="fCollect">—</strong> ms</span>
-  <span class="sep">|</span>
-  <span>数据龄 <strong id="fAge">—</strong> s</span>
-  <span class="sep">|</span>
-  <span>Ping龄 <strong id="fPingAge">—</strong> s</span>
-  <span class="sep">|</span>
-  <span>更新 <strong id="fUpdated">—</strong></span>
-  <span class="sep">|</span>
-  <span>状态 <strong id="fStatus">—</strong></span>
-  <span class="sep">|</span>
-  <span>服务运行 <strong id="fUptime">—</strong></span>
-  <span class="sep">|</span>
-  <span>v<strong id="fVer">—</strong></span>
+<footer class="bar" id="statusBar">
+  <span class="f-item">日期 <strong id="fDate">—</strong></span>
+  <span class="f-item">时间 <strong id="fTime">—</strong></span>
+  <span class="f-item">请求 <strong id="fReq">—</strong> ms</span>
+  <span class="f-item">采集 <strong id="fCollect">—</strong> ms</span>
+  <span class="f-item">数据龄 <strong id="fAge">—</strong> s</span>
+  <span class="f-item">Ping龄 <strong id="fPingAge">—</strong> s</span>
+  <span class="f-item">更新 <strong id="fUpdated">—</strong></span>
+  <span class="f-item">状态 <strong id="fStatus">—</strong></span>
+  <span class="f-item">运行 <strong id="fUptime">—</strong></span>
+  <span class="f-item">v<strong id="fVer">—</strong></span>
 </footer>
 
 <script>
@@ -1290,9 +1298,10 @@ body[data-theme="tower"] #rain {
     var btn = $("themeBtn");
     if (btn) {
       // 按钮文案表示「切换到」的目标主题
-      btn.textContent = theme === "tower" ? "仪表盘" : "竖向主题";
+      // 文案表示「将要切换到」的目标主题
+      btn.textContent = theme === "tower" ? "横向主题" : "竖向主题";
       btn.setAttribute("aria-pressed", theme === "tower" ? "true" : "false");
-      btn.title = theme === "tower" ? "切换为仪表盘布局" : "切换为竖向居中布局";
+      btn.title = theme === "tower" ? "切换为横向布局" : "切换为竖向居中布局";
     }
     // 主题切换后重算数字雨画布
     if (typeof resizeRain === "function") {
@@ -1375,16 +1384,12 @@ body[data-theme="tower"] #rain {
       lastSysSig = "";
       return;
     }
-    // 物理/逻辑核心、系统版本、架构等均单独成行，避免合并隐藏
+    // 界面不展示：系统版本 / 架构 / 物理核心 / 逻辑核心（后端 API 仍可能包含）
     var items = [
       ["主机名", sys.hostname],
       ["操作系统", sys.os_name],
-      ["系统版本", sys.os_version != null && sys.os_version !== "" ? sys.os_version : "—"],
       ["内核", sys.kernel],
-      ["架构", sys.arch != null && sys.arch !== "" ? sys.arch : "—"],
       ["CPU 型号", sys.cpu_model],
-      ["物理核心", sys.cpu_physical_cores != null ? sys.cpu_physical_cores : "—"],
-      ["逻辑核心", sys.cpu_logical_cores != null ? sys.cpu_logical_cores : "—"],
       ["负载 1/5/15", [sys.load_1, sys.load_5, sys.load_15].join(" / ")],
       ["内存", fmtBytes(sys.memory_used) + " / " + fmtBytes(sys.memory_total)],
       ["可用内存", fmtBytes(sys.memory_available)],
@@ -1427,6 +1432,10 @@ body[data-theme="tower"] #rain {
       return;
     }
     var targets = ping.targets || [];
+    if ($("pingTitle")) {
+      var onlineN = targets.filter(function (t) { return t.online; }).length;
+      $("pingTitle").textContent = "02 // 外部 Ping · " + onlineN + "/" + targets.length + " 在线";
+    }
     var sig = targets.map(function (t) {
       return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.last_check].join(":");
     }).join("|");
@@ -1559,19 +1568,44 @@ body[data-theme="tower"] #rain {
     canvas.style.height = window.innerHeight + "px";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     var mobile = window.innerWidth < 768;
-    fontSize = mobile ? 16 : 14;
-    frameGap = mobile ? 70 : 48;
+    var tower = isTowerTheme();
+    fontSize = mobile ? 15 : 14;
+    frameGap = mobile ? 64 : (tower ? 42 : 48);
     cols = Math.floor(window.innerWidth / fontSize);
-    var density = mobile ? 0.45 : 0.85;
+    // 竖向主题提高密度，两侧 gutter 更有数据流感
+    var density = tower ? (mobile ? 0.7 : 1.05) : (mobile ? 0.45 : 0.85);
     var n = Math.max(1, Math.floor(cols * density));
     drops = [];
+    var bounds = tower ? towerCenterBounds() : null;
     for (var i = 0; i < n; i++) {
+      var x;
+      if (tower && bounds && (bounds.left > 20 || bounds.right < window.innerWidth - 20)) {
+        if (Math.random() < 0.5 && bounds.left > 20) {
+          x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
+        } else {
+          var rc = Math.floor(Math.max(1, (window.innerWidth - bounds.right) / fontSize));
+          x = bounds.right + Math.floor(Math.random() * rc) * fontSize;
+        }
+      } else {
+        x = Math.floor(Math.random() * cols) * fontSize;
+      }
       drops.push({
-        x: Math.floor(Math.random() * cols) * fontSize,
+        x: x,
         y: Math.random() * -100,
-        speed: 0.6 + Math.random() * 1.4
+        speed: 0.6 + Math.random() * 1.5
       });
     }
+  }
+
+  function isTowerTheme() {
+    return document.body.getAttribute("data-theme") === "tower";
+  }
+
+  function towerCenterBounds() {
+    // 与 CSS max-width:520px 对齐，两侧留给数字雨
+    var cw = Math.min(520, Math.max(280, window.innerWidth - 28));
+    var left = Math.max(0, (window.innerWidth - cw) / 2);
+    return { left: left, right: left + cw, width: cw };
   }
 
   function drawRain(ts) {
@@ -1585,20 +1619,71 @@ body[data-theme="tower"] #rain {
       return;
     }
     lastFrame = ts;
-    ctx.fillStyle = "rgba(2, 6, 4, 0.18)";
-    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var tower = isTowerTheme();
+    var bounds = tower ? towerCenterBounds() : null;
+
+    ctx.fillStyle = "rgba(2, 6, 4, 0.16)";
+    ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "#00ff6a";
     ctx.font = fontSize + "px monospace";
+
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i];
-      var ch = chars.charAt(Math.floor(Math.random() * chars.length));
-      ctx.globalAlpha = 0.35 + Math.random() * 0.45;
-      ctx.fillText(ch, d.x, d.y * fontSize);
-      d.y += d.speed;
-      if (d.y * fontSize > window.innerHeight && Math.random() > 0.975) {
-        d.y = Math.random() * -20;
-        d.x = Math.floor(Math.random() * cols) * fontSize;
+      // 竖向主题：优先把雨滴约束在左右两侧 gutter，形成两侧数据流
+      if (tower && bounds) {
+        var inCenter = d.x >= bounds.left - 4 && d.x <= bounds.right + 4;
+        if (inCenter) {
+          // 将中心雨滴弹到左右 gutter
+          if (Math.random() < 0.5 && bounds.left > fontSize * 2) {
+            d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
+          } else if (bounds.right < w - fontSize * 2) {
+            var rightCols = Math.floor((w - bounds.right) / fontSize);
+            d.x = bounds.right + Math.floor(Math.random() * Math.max(1, rightCols)) * fontSize;
+          } else {
+            d.x = Math.floor(Math.random() * cols) * fontSize;
+          }
+        }
       }
+      var ch = chars.charAt(Math.floor(Math.random() * chars.length));
+      var sideBoost = 0;
+      if (tower && bounds) {
+        sideBoost = (d.x < bounds.left || d.x > bounds.right) ? 0.2 : -0.25;
+      }
+      ctx.globalAlpha = Math.max(0.12, Math.min(0.9, 0.35 + Math.random() * 0.45 + sideBoost));
+      ctx.fillText(ch, d.x, d.y * fontSize);
+      d.y += d.speed * (tower ? 1.15 : 1);
+      if (d.y * fontSize > h && Math.random() > 0.975) {
+        d.y = Math.random() * -20;
+        if (tower && bounds && (bounds.left > 24 || bounds.right < w - 24)) {
+          if (Math.random() < 0.5 && bounds.left > 24) {
+            d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
+          } else {
+            var rc = Math.floor(Math.max(1, (w - bounds.right) / fontSize));
+            d.x = bounds.right + Math.floor(Math.random() * rc) * fontSize;
+          }
+        } else {
+          d.x = Math.floor(Math.random() * cols) * fontSize;
+        }
+      }
+    }
+
+    // 竖向主题：中心半透明暗化，突出两侧数据流，且不挡住阅读
+    if (tower && bounds) {
+      var g = ctx.createLinearGradient(bounds.left - 40, 0, bounds.left + 20, 0);
+      g.addColorStop(0, "rgba(2,6,4,0)");
+      g.addColorStop(1, "rgba(2,6,4,0.55)");
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = g;
+      ctx.fillRect(bounds.left - 40, 0, 60, h);
+      var g2 = ctx.createLinearGradient(bounds.right - 20, 0, bounds.right + 40, 0);
+      g2.addColorStop(0, "rgba(2,6,4,0.55)");
+      g2.addColorStop(1, "rgba(2,6,4,0)");
+      ctx.fillStyle = g2;
+      ctx.fillRect(bounds.right - 20, 0, 60, h);
+      ctx.fillStyle = "rgba(2, 6, 4, 0.22)";
+      ctx.fillRect(bounds.left, 0, bounds.width, h);
     }
     ctx.globalAlpha = 1;
     requestAnimationFrame(drawRain);
