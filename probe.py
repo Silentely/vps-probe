@@ -32,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -1034,7 +1034,7 @@ footer.status-bar .footer-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center; /* 底栏信息水平居中 */
   gap: 6px 8px;
   width: 100%;
   box-sizing: border-box;
@@ -1213,7 +1213,7 @@ body[data-theme="tower"] .ping-table {
   font-size: 10px;
 }
 body[data-theme="tower"] footer.status-bar .footer-inner {
-  justify-content: flex-start;
+  justify-content: center;
 }
 @media (max-width: 640px) {
   body[data-theme="tower"] .wrap {
@@ -1279,16 +1279,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
 
 <footer class="status-bar" id="statusBar">
   <div class="footer-inner">
-    <span class="f-item">日期 <strong id="fDate">—</strong></span>
-    <span class="f-item">时间 <strong id="fTime">—</strong></span>
-    <span class="f-item">请求 <strong id="fReq">—</strong> ms</span>
-    <span class="f-item">采集 <strong id="fCollect">—</strong> ms</span>
-    <span class="f-item">数据龄 <strong id="fAge">—</strong> s</span>
-    <span class="f-item">Ping龄 <strong id="fPingAge">—</strong> s</span>
-    <span class="f-item">更新 <strong id="fUpdated">—</strong></span>
-    <span class="f-item">状态 <strong id="fStatus">—</strong></span>
-    <span class="f-item">运行 <strong id="fUptime">—</strong></span>
-    <span class="f-item">v<strong id="fVer">—</strong></span>
+    <span class="f-item" title="浏览器本地日期">日期 <strong id="fDate">—</strong></span>
+    <span class="f-item" title="浏览器本地时间">时间 <strong id="fTime">—</strong></span>
+    <span class="f-item" title="浏览器请求接口往返耗时">请求 <strong id="fReq">—</strong> ms</span>
+    <span class="f-item" title="服务端采集系统指标耗时">采集 <strong id="fCollect">—</strong> ms</span>
+    <span class="f-item" title="系统指标距上次采集已过秒数">指标距今 <strong id="fAge">—</strong> s</span>
+    <span class="f-item" title="Ping 结果距上次检测已过秒数">探测距今 <strong id="fPingAge">—</strong> s</span>
+    <span class="f-item" title="服务端最近一次成功返回时间">更新于 <strong id="fUpdated">—</strong></span>
+    <span class="f-item" title="与后端连接状态">状态 <strong id="fStatus">—</strong></span>
+    <span class="f-item" title="探针服务持续运行时间">服务运行 <strong id="fUptime">—</strong></span>
+    <span class="f-item" title="探针版本">v<strong id="fVer">—</strong></span>
   </div>
 </footer>
 
