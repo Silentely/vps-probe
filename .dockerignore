@@ -11,3 +11,7 @@ venv
 .pytest_cache
 .mypy_cache
 .omc
+bohrium-sync.sh
+_remote_*.sh
+_footer_inspect*.js
+images
