@@ -32,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -804,7 +804,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <style>
 :root {
   --bg: #020604;
-  --panel: rgba(0, 18, 8, 0.78);
+  /* 面板半透明，透出矩阵数字雨 */
+  --panel: rgba(0, 14, 6, 0.52);
+  --panel-solid: rgba(0, 12, 5, 0.72);
   --border: #00ff6a;
   --text: #b6ffcb;
   --dim: #3d8f5a;
@@ -814,6 +816,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   --offline: #666;
   --glow: 0 0 12px rgba(0, 255, 106, 0.35);
   --font: "SF Mono", "Cascadia Code", "Consolas", "Menlo", ui-monospace, monospace;
+  --rain-opacity: 0.40;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html {
@@ -837,7 +840,8 @@ body {
 #rain {
   position: fixed; inset: 0; z-index: 0;
   width: 100%; height: 100%;
-  pointer-events: none; opacity: 0.22;
+  pointer-events: none;
+  opacity: var(--rain-opacity);
 }
 .scanlines {
   position: fixed; inset: 0; z-index: 1; pointer-events: none;
@@ -845,10 +849,11 @@ body {
     0deg,
     transparent,
     transparent 2px,
-    rgba(0, 0, 0, 0.12) 2px,
-    rgba(0, 0, 0, 0.12) 4px
+    rgba(0, 0, 0, 0.06) 2px,
+    rgba(0, 0, 0, 0.06) 4px
   );
   mix-blend-mode: multiply;
+  opacity: 0.55;
 }
 .wrap {
   position: relative; z-index: 2;
@@ -869,6 +874,8 @@ header.app {
   box-shadow: var(--glow);
   padding: 10px 14px;
   border-radius: 4px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 header.app h1 {
   font-size: 15px; letter-spacing: 0.12em; color: var(--ok);
@@ -907,6 +914,9 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   padding: 12px;
   position: relative;
   overflow: hidden;
+  /* 轻微毛玻璃：半透出背后数字雨，同时保持文字可读 */
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 .panel::before {
   content: "";
@@ -929,7 +939,7 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 .kv .item {
   border: 1px solid rgba(0,255,106,0.12);
-  background: rgba(0,0,0,0.25);
+  background: rgba(0, 0, 0, 0.18);
   padding: 7px 8px; border-radius: 3px;
 }
 /* 仪表盘默认：标签在上、值在下 */
@@ -987,7 +997,7 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 .term-body {
   flex: 1; overflow-y: auto; font-size: 12px;
-  background: rgba(0,0,0,0.45);
+  background: rgba(0, 0, 0, 0.32);
   border: 1px solid rgba(0,255,106,0.15);
   padding: 8px 10px;
   border-radius: 3px;
@@ -1117,17 +1127,18 @@ footer.status-bar strong {
 }
 
 /* ---- 竖向居中滚动主题 ----
-   中间内容卡片；两侧露出矩阵数字雨（#rain 全屏，中心半透明遮罩由 JS 绘制） */
+   中间半透明卡片；两侧强化矩阵数字雨 */
 body[data-theme="tower"] {
   overflow-x: hidden;
   overflow-y: auto;
+  --rain-opacity: 0.58;
+  --panel: rgba(0, 12, 5, 0.48);
 }
 body[data-theme="tower"] #rain {
-  opacity: 0.42;
   z-index: 0;
 }
 body[data-theme="tower"] .scanlines {
-  opacity: 0.85;
+  opacity: 0.4;
 }
 body[data-theme="tower"] .wrap {
   max-width: 520px;
@@ -1136,7 +1147,6 @@ body[data-theme="tower"] .wrap {
   min-height: 100%;
   padding: 16px 14px calc(120px + env(safe-area-inset-bottom, 0px));
   align-items: stretch;
-  /* 中心面板略提亮，两侧靠数字雨衬托 */
   position: relative;
   z-index: 2;
 }
@@ -1145,7 +1155,9 @@ body[data-theme="tower"] header.app {
   align-items: center;
   text-align: center;
   gap: 10px;
-  background: rgba(0, 14, 6, 0.88);
+  background: rgba(0, 14, 6, 0.55);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
 }
 body[data-theme="tower"] header.app h1 {
   font-size: 14px;
@@ -1162,7 +1174,9 @@ body[data-theme="tower"] .grid {
 }
 body[data-theme="tower"] .panel {
   width: 100%;
-  background: rgba(0, 16, 8, 0.9);
+  background: rgba(0, 14, 6, 0.50);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
 }
 body[data-theme="tower"] .terminal {
   grid-column: auto;
@@ -1219,7 +1233,9 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   body[data-theme="tower"] .wrap {
     width: min(100%, calc(100% - 16px));
   }
-  body[data-theme="tower"] #rain { opacity: 0.28; }
+  body[data-theme="tower"] {
+    --rain-opacity: 0.42;
+  }
 }
 </style>
 </head>
@@ -1604,7 +1620,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     frameGap = mobile ? 64 : (tower ? 42 : 48);
     cols = Math.floor(window.innerWidth / fontSize);
     // 竖向主题提高密度，两侧 gutter 更有数据流感
-    var density = tower ? (mobile ? 0.7 : 1.05) : (mobile ? 0.45 : 0.85);
+    var density = tower ? (mobile ? 0.85 : 1.25) : (mobile ? 0.55 : 1.0);
     var n = Math.max(1, Math.floor(cols * density));
     drops = [];
     var bounds = tower ? towerCenterBounds() : null;
@@ -1655,18 +1671,18 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var tower = isTowerTheme();
     var bounds = tower ? towerCenterBounds() : null;
 
-    ctx.fillStyle = "rgba(2, 6, 4, 0.16)";
+    // 残影更淡，保留更多雨迹可见
+    ctx.fillStyle = "rgba(2, 6, 4, 0.10)";
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "#00ff6a";
     ctx.font = fontSize + "px monospace";
 
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i];
-      // 竖向主题：优先把雨滴约束在左右两侧 gutter，形成两侧数据流
+      // 竖向主题：优先两侧 gutter，中心也保留少量雨丝透出面板
       if (tower && bounds) {
         var inCenter = d.x >= bounds.left - 4 && d.x <= bounds.right + 4;
-        if (inCenter) {
-          // 将中心雨滴弹到左右 gutter
+        if (inCenter && Math.random() > 0.22) {
           if (Math.random() < 0.5 && bounds.left > fontSize * 2) {
             d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
           } else if (bounds.right < w - fontSize * 2) {
@@ -1680,15 +1696,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       var ch = chars.charAt(Math.floor(Math.random() * chars.length));
       var sideBoost = 0;
       if (tower && bounds) {
-        sideBoost = (d.x < bounds.left || d.x > bounds.right) ? 0.2 : -0.25;
+        sideBoost = (d.x < bounds.left || d.x > bounds.right) ? 0.28 : -0.08;
       }
-      ctx.globalAlpha = Math.max(0.12, Math.min(0.9, 0.35 + Math.random() * 0.45 + sideBoost));
+      // 提高字符亮度区间，使数据流更清晰
+      ctx.globalAlpha = Math.max(0.22, Math.min(0.95, 0.48 + Math.random() * 0.42 + sideBoost));
       ctx.fillText(ch, d.x, d.y * fontSize);
-      d.y += d.speed * (tower ? 1.15 : 1);
-      if (d.y * fontSize > h && Math.random() > 0.975) {
+      d.y += d.speed * (tower ? 1.2 : 1.05);
+      if (d.y * fontSize > h && Math.random() > 0.97) {
         d.y = Math.random() * -20;
         if (tower && bounds && (bounds.left > 24 || bounds.right < w - 24)) {
-          if (Math.random() < 0.5 && bounds.left > 24) {
+          if (Math.random() < 0.62 && bounds.left > 24) {
             d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
           } else {
             var rc = Math.floor(Math.max(1, (w - bounds.right) / fontSize));
@@ -1700,21 +1717,19 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       }
     }
 
-    // 竖向主题：中心半透明暗化，突出两侧数据流，且不挡住阅读
+    // 竖向主题：仅两侧柔和过渡，中心不再大面积压暗（避免看不见雨）
     if (tower && bounds) {
-      var g = ctx.createLinearGradient(bounds.left - 40, 0, bounds.left + 20, 0);
-      g.addColorStop(0, "rgba(2,6,4,0)");
-      g.addColorStop(1, "rgba(2,6,4,0.55)");
       ctx.globalAlpha = 1;
+      var g = ctx.createLinearGradient(bounds.left - 36, 0, bounds.left + 12, 0);
+      g.addColorStop(0, "rgba(2,6,4,0)");
+      g.addColorStop(1, "rgba(2,6,4,0.18)");
       ctx.fillStyle = g;
-      ctx.fillRect(bounds.left - 40, 0, 60, h);
-      var g2 = ctx.createLinearGradient(bounds.right - 20, 0, bounds.right + 40, 0);
-      g2.addColorStop(0, "rgba(2,6,4,0.55)");
+      ctx.fillRect(bounds.left - 36, 0, 48, h);
+      var g2 = ctx.createLinearGradient(bounds.right - 12, 0, bounds.right + 36, 0);
+      g2.addColorStop(0, "rgba(2,6,4,0.18)");
       g2.addColorStop(1, "rgba(2,6,4,0)");
       ctx.fillStyle = g2;
-      ctx.fillRect(bounds.right - 20, 0, 60, h);
-      ctx.fillStyle = "rgba(2, 6, 4, 0.22)";
-      ctx.fillRect(bounds.left, 0, bounds.width, h);
+      ctx.fillRect(bounds.right - 12, 0, 48, h);
     }
     ctx.globalAlpha = 1;
     requestAnimationFrame(drawRain);
