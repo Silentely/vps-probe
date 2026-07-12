@@ -16,7 +16,6 @@ import socket
 import subprocess
 import threading
 import time
-import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -33,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -43,6 +42,7 @@ PING_TIMEOUT = 2                # 单次 Ping 超时（秒）
 PING_HISTORY_SIZE = 30          # 每目标保留的延迟样本数
 EVENT_MAX = 100                 # 事件最多保留条数
 EVENT_DEDUP_WINDOW = 60.0       # 相同异常限频窗口（秒）
+EVENT_LAST_MAX = 256            # 限频键上限，防止字典无限增长
 WARN_USAGE = 80.0               # 使用率警告阈值 %
 DANGER_USAGE = 90.0             # 使用率危险阈值 %
 WARN_LATENCY_MS = 100.0
@@ -77,6 +77,9 @@ _ping_results: Dict[str, Dict[str, Any]] = {}
 _ping_history: Dict[str, Deque[float]] = {
     t["id"]: deque(maxlen=PING_HISTORY_SIZE) for t in PING_TARGETS
 }
+_ping_success_flags: Dict[str, Deque[int]] = {
+    t["id"]: deque(maxlen=PING_HISTORY_SIZE) for t in PING_TARGETS
+}
 _ping_prev_online: Dict[str, Optional[bool]] = {t["id"]: None for t in PING_TARGETS}
 _ping_updated_at = 0.0
 
@@ -89,6 +92,7 @@ _prev_alerts: Dict[str, bool] = {
     "mem": False,
     "disk": False,
 }
+_cpu_primed = False
 
 
 def _now_iso() -> str:
@@ -116,6 +120,18 @@ def add_event(level: str, message: str, dedup_key: Optional[str] = None) -> None
         if last is not None and (now - last) < EVENT_DEDUP_WINDOW:
             return
         _event_last[key] = now
+        # 限制限频表体积：过期键优先清理
+        if len(_event_last) > EVENT_LAST_MAX:
+            cutoff = now - EVENT_DEDUP_WINDOW * 2
+            stale = [k for k, ts in _event_last.items() if ts < cutoff]
+            for k in stale:
+                _event_last.pop(k, None)
+            if len(_event_last) > EVENT_LAST_MAX:
+                # 仍过多则丢弃最旧一半
+                for k, _ in sorted(_event_last.items(), key=lambda kv: kv[1])[
+                    : len(_event_last) // 2
+                ]:
+                    _event_last.pop(k, None)
         _events.appendleft(
             {
                 "ts": _now_iso(),
@@ -213,16 +229,20 @@ def _cpu_model() -> str:
 
 def collect_metrics() -> Tuple[Dict[str, Any], float]:
     """从当前主机真实读取系统数据，返回 (指标字典, 采集耗时毫秒)。"""
-    global _prev_net
+    global _prev_net, _cpu_primed
 
     t0 = time.perf_counter()
     os_name, os_version = _read_os_release()
     boot_ts = psutil.boot_time()
     uptime_sec = max(0, int(time.time() - boot_ts))
 
-    # CPU
+    # CPU：首次短阻塞 priming，之后非阻塞采样，避免每轮卡住 150ms
     try:
-        cpu_percent = float(psutil.cpu_percent(interval=0.15))
+        if not _cpu_primed:
+            cpu_percent = float(psutil.cpu_percent(interval=0.1))
+            _cpu_primed = True
+        else:
+            cpu_percent = float(psutil.cpu_percent(interval=None))
     except Exception:
         cpu_percent = 0.0
     try:
@@ -512,16 +532,8 @@ def run_ping_round() -> None:
             if ok and rtt is not None:
                 hist.append(rtt)
 
-            # 丢包：用近期样本中失败占比近似；本轮失败则记一次“失败点”
-            # 简化：保留成功 rtt；用独立 success 计数
-            # 使用滑动窗口：每轮追加成功 rtt；失败时记录 NaN 用 None 标记在侧表
-            # 这里用：历史仅成功；loss = 基于最近 rounds 的 success 计数
-            # 更稳妥：维护 success/fail 计数 deque
-            if not hasattr(run_ping_round, "_sf"):
-                run_ping_round._sf = {  # type: ignore[attr-defined]
-                    x["id"]: deque(maxlen=PING_HISTORY_SIZE) for x in PING_TARGETS
-                }
-            sf: Deque[int] = run_ping_round._sf[tid]  # type: ignore[attr-defined]
+            # 丢包：独立成功/失败滑动窗口（与 RTT 历史分离）
+            sf = _ping_success_flags[tid]
             sf.append(1 if ok else 0)
             total = len(sf) or 1
             success_n = sum(sf)
@@ -1188,6 +1200,8 @@ body[data-theme="tower"] #rain {
   <span class="sep">|</span>
   <span>数据龄 <strong id="fAge">—</strong> s</span>
   <span class="sep">|</span>
+  <span>Ping龄 <strong id="fPingAge">—</strong> s</span>
+  <span class="sep">|</span>
   <span>更新 <strong id="fUpdated">—</strong></span>
   <span class="sep">|</span>
   <span>状态 <strong id="fStatus">—</strong></span>
@@ -1203,13 +1217,18 @@ body[data-theme="tower"] #rain {
 
   var lastOk = null;
   var lastEventsSig = "";
+  var lastSysSig = "";
+  var lastPingSig = "";
   var pollMs = 2000;
   var timer = null;
   var clockTimer = null;
   var serviceUptimeBase = 0;
   var serviceUptimeAt = 0;
   var THEME_KEY = "vps-probe-theme";
-  var THEMES = { dashboard: "仪表盘", tower: "竖向主题" };
+  var reducedMotion = false;
+  try {
+    reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  } catch (e) {}
 
   function $(id) { return document.getElementById(id); }
 
@@ -1300,9 +1319,17 @@ body[data-theme="tower"] #rain {
       '<span class="pct ' + esc(st) + '">' + p.toFixed(1) + '%</span></div>';
   }
 
+  function compactTime(s) {
+    if (!s || typeof s !== "string") return "—";
+    // 2026-07-12T20:49:44+08:00 → 20:49:44
+    var m = s.match(/T(\d{2}:\d{2}:\d{2})/);
+    return m ? m[1] : s;
+  }
+
   function renderSystem(sys) {
     if (!sys || !Object.keys(sys).length) {
       $("sysKv").innerHTML = '<div class="item"><span class="k">状态</span><span class="v">等待首次采集…</span></div>';
+      lastSysSig = "";
       return;
     }
     // 物理/逻辑核心、系统版本、架构等均单独成行，避免合并隐藏
@@ -1330,6 +1357,10 @@ body[data-theme="tower"] #rain {
       ["上传速率", fmtRate(sys.net_up_rate)],
       ["下载速率", fmtRate(sys.net_down_rate)]
     ];
+    var sig = items.map(function (it) { return it[0] + "=" + it[1]; }).join("|") +
+      "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent;
+    if (sig === lastSysSig) return;
+    lastSysSig = sig;
     $("sysKv").innerHTML = items.map(function (it) {
       return '<div class="item"><span class="k">' + esc(it[0]) + '</span><span class="v">' + esc(it[1]) + '</span></div>';
     }).join("");
@@ -1344,25 +1375,34 @@ body[data-theme="tower"] #rain {
     var body = $("pingBody");
     if (!ping) {
       body.innerHTML = '<tr><td colspan="9">等待数据…</td></tr>';
+      lastPingSig = "";
       return;
     }
     if (ping.available === false) {
       body.innerHTML = '<tr><td colspan="9" class="st danger">系统未安装 ping，延迟检测不可用</td></tr>';
+      lastPingSig = "unavailable";
       return;
     }
-    var rows = (ping.targets || []).map(function (t) {
+    var targets = ping.targets || [];
+    var sig = targets.map(function (t) {
+      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.last_check].join(":");
+    }).join("|");
+    if (sig === lastPingSig) return;
+    lastPingSig = sig;
+    var rows = targets.map(function (t) {
       var st = t.status || (t.online ? "ok" : "offline");
       var stLabel = t.online ? "在线" : (st === "unavailable" ? "不可用" : (st === "pending" ? "等待" : "离线"));
+      var ms = function (v) { return v != null ? Number(v).toFixed(1) : "—"; };
       return "<tr>" +
         "<td>" + esc(t.name) + "</td>" +
         '<td class="host" title="' + esc(t.host) + '">' + esc(t.host) + "</td>" +
-        "<td>" + esc(t.current_ms != null ? t.current_ms.toFixed(1) + " ms" : "—") + "</td>" +
-        "<td>" + esc(t.min_ms != null ? t.min_ms.toFixed(1) : "—") + "</td>" +
-        "<td>" + esc(t.max_ms != null ? t.max_ms.toFixed(1) : "—") + "</td>" +
-        "<td>" + esc(t.avg_ms != null ? t.avg_ms.toFixed(1) : "—") + "</td>" +
-        "<td>" + esc(t.loss_percent != null ? t.loss_percent.toFixed(1) + "%" : "—") + "</td>" +
+        "<td>" + esc(t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : "—") + "</td>" +
+        "<td>" + esc(ms(t.min_ms)) + "</td>" +
+        "<td>" + esc(ms(t.max_ms)) + "</td>" +
+        "<td>" + esc(ms(t.avg_ms)) + "</td>" +
+        "<td>" + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(1) + "%" : "—") + "</td>" +
         '<td class="st ' + esc(st) + '">' + esc(stLabel) + "</td>" +
-        "<td>" + esc(t.last_check || "—") + "</td>" +
+        "<td title=\"" + esc(t.last_check || "") + "\">" + esc(compactTime(t.last_check)) + "</td>" +
         "</tr>";
     });
     body.innerHTML = rows.join("") || '<tr><td colspan="9">无目标</td></tr>';
@@ -1374,13 +1414,16 @@ body[data-theme="tower"] #rain {
     var sig = list.map(function (e) { return e.ts + e.level + e.message; }).join("|");
     if (sig === lastEventsSig && term.childNodes.length) return;
     lastEventsSig = sig;
+    var nearBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 48;
     var html = list.slice().reverse().map(function (e) {
       return '<div class="term-line"><span class="ts">[' + esc(e.ts) + ']</span>' +
         '<span class="lv ' + esc(e.level) + '">' + esc(e.level) + '</span>' +
         '<span class="msg">' + esc(e.message) + '</span></div>';
     }).join("");
     term.innerHTML = html + '<div class="term-line"><span class="ts">$</span> <span class="cursor"></span></div>';
-    term.scrollTop = term.scrollHeight;
+    if (nearBottom || term.scrollTop === 0) {
+      term.scrollTop = term.scrollHeight;
+    }
   }
 
   function tickClock() {
@@ -1407,6 +1450,9 @@ body[data-theme="tower"] #rain {
     $("fCollect").textContent = data.collect_ms != null ? Number(data.collect_ms).toFixed(1) : "—";
     $("fReq").textContent = reqMs != null ? reqMs.toFixed(1) : "—";
     $("fAge").textContent = data.metrics_age_seconds != null ? Number(data.metrics_age_seconds).toFixed(1) : "—";
+    if ($("fPingAge")) {
+      $("fPingAge").textContent = data.ping_age_seconds != null ? Number(data.ping_age_seconds).toFixed(1) : "—";
+    }
     // 压缩时间戳展示，避免底栏单行过长被裁切
     var st = data.server_time || "—";
     if (typeof st === "string" && st.length > 19) {
@@ -1418,7 +1464,10 @@ body[data-theme="tower"] #rain {
     renderEvents(data.events);
   }
 
+  var pollInFlight = false;
   function poll() {
+    if (pollInFlight) return;
+    pollInFlight = true;
     var t0 = performance.now();
     fetch("/api/status", { cache: "no-store" })
       .then(function (r) {
@@ -1437,6 +1486,9 @@ body[data-theme="tower"] #rain {
           // 保留最后成功数据，仅更新请求失败态
           $("fReq").textContent = (performance.now() - t0).toFixed(1);
         }
+      })
+      .then(function () {
+        pollInFlight = false;
       });
   }
 
@@ -1452,6 +1504,7 @@ body[data-theme="tower"] #rain {
   var frameGap = 48;
 
   function resizeRain() {
+    if (reducedMotion || !canvas || !ctx) return;
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.floor(window.innerWidth * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
@@ -1475,6 +1528,7 @@ body[data-theme="tower"] #rain {
   }
 
   function drawRain(ts) {
+    if (reducedMotion) return;
     if (!rainActive) {
       requestAnimationFrame(drawRain);
       return;
@@ -1521,9 +1575,20 @@ body[data-theme="tower"] #rain {
       toggleTheme();
     });
   }
+  // 快捷键 T：切换主题（输入框场景本页无）
+  document.addEventListener("keydown", function (ev) {
+    if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    if (ev.key === "t" || ev.key === "T") {
+      toggleTheme();
+    }
+  });
 
-  resizeRain();
-  requestAnimationFrame(drawRain);
+  if (!reducedMotion) {
+    resizeRain();
+    requestAnimationFrame(drawRain);
+  } else if (canvas) {
+    canvas.style.display = "none";
+  }
   tickClock();
   clockTimer = setInterval(tickClock, 1000);
   poll();
@@ -1538,9 +1603,16 @@ body[data-theme="tower"] #rain {
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
+class _ReuseThreadingHTTPServer(ThreadingHTTPServer):
+    """支持地址复用，便于快速重启；daemon 线程不阻塞退出。"""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def main() -> None:
     start_workers()
-    server = ThreadingHTTPServer((HOST, PORT), ProbeHandler)
+    server = _ReuseThreadingHTTPServer((HOST, PORT), ProbeHandler)
 
     def _shutdown(*_args: Any) -> None:
         print(f"\n[{_now_iso()}] 收到停止信号，正在关闭…")
