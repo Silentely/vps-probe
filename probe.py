@@ -33,8 +33,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
+SYS_HISTORY_SIZE = 20           # 系统指标历史样本数（CPU/内存/磁盘趋势图）
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -84,6 +85,14 @@ _metrics: Dict[str, Any] = {}
 _metrics_collect_ms = 0.0
 _metrics_updated_at = 0.0
 _prev_net: Optional[Tuple[int, int, float]] = None  # bytes_sent, bytes_recv, ts
+
+# 系统指标历史（趋势图用）
+_sys_history: Dict[str, Deque[float]] = {
+    "cpu": deque(maxlen=SYS_HISTORY_SIZE),
+    "mem": deque(maxlen=SYS_HISTORY_SIZE),
+    "swap": deque(maxlen=SYS_HISTORY_SIZE),
+    "disk": deque(maxlen=SYS_HISTORY_SIZE),
+}
 
 _ping_available: Optional[bool] = None
 _ping_results: Dict[str, Dict[str, Any]] = {}
@@ -442,6 +451,12 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "net_exclude_loopback": True,
         "timezone": _tz_label(),
     }
+
+    # 记录系统指标历史（趋势图用）
+    _sys_history["cpu"].append(round(cpu_percent, 1))
+    _sys_history["mem"].append(round(mem_percent, 1))
+    _sys_history["swap"].append(round(swap_percent, 1))
+    _sys_history["disk"].append(round(disk_percent, 1))
 
     # 告警事件（状态边沿 + 限频）
     _emit_metric_alerts(data)
@@ -827,6 +842,12 @@ def build_status_payload() -> Dict[str, Any]:
             if _ping_updated_at
             else None,
             "system": dict(_metrics) if _metrics else {},
+            "system_history": {
+                "cpu": list(_sys_history["cpu"])[-SPARK_HISTORY:],
+                "mem": list(_sys_history["mem"])[-SPARK_HISTORY:],
+                "swap": list(_sys_history["swap"])[-SPARK_HISTORY:],
+                "disk": list(_sys_history["disk"])[-SPARK_HISTORY:],
+            },
             "ping": {
                 "available": bool(_ping_available) if _ping_available is not None else None,
                 "icmp_available": bool(_ping_available) if _ping_available is not None else None,
@@ -961,7 +982,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 (function () {
   try {
     var t = localStorage.getItem("vps-probe-theme");
-    if (t === "tower" || t === "dashboard") {
+    if (t === "dashboard") {
       document.documentElement.setAttribute("data-theme", t);
     }
   } catch (e) {}
@@ -1130,9 +1151,13 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 .meter { margin-top: 10px; }
 .meter .row {
-  display: grid; grid-template-columns: 72px 1fr 52px;
+  display: grid; grid-template-columns: 72px 1fr 52px 60px;
   gap: 8px; align-items: center; margin-bottom: 8px;
 }
+.meter-spark {
+  display: flex; align-items: center; justify-content: flex-end;
+}
+.meter-spark svg { display: block; }
 .meter .label { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .meter .pct { text-align: right; font-variant-numeric: tabular-nums; min-width: 42px; }
 /* 进度条专用，类名 meter-bar，避免与底栏冲突 */
@@ -1316,7 +1341,7 @@ footer.status-bar strong {
 .header-actions {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.theme-btn, .icon-btn {
+.icon-btn {
   appearance: none; cursor: pointer;
   font-family: var(--font); font-size: 11px;
   color: var(--ok);
@@ -1333,16 +1358,16 @@ footer.status-bar strong {
   padding: 4px 10px;
   line-height: 1;
 }
-.theme-btn:hover, .icon-btn:hover {
+.icon-btn:hover {
   background: rgba(0, 50, 20, 0.85);
   border-color: var(--ok);
   box-shadow: 0 0 12px rgba(0,255,136,0.35);
 }
-.theme-btn:active, .icon-btn:active {
+.icon-btn:active {
   transform: scale(0.96);
   box-shadow: 0 0 4px rgba(0,255,106,0.2);
 }
-.theme-btn:focus-visible, .icon-btn:focus-visible {
+.icon-btn:focus-visible {
   outline: 1px solid var(--ok);
   outline-offset: 2px;
 }
@@ -1433,7 +1458,7 @@ button:focus-visible, select:focus-visible {
   box-shadow: 0 0 8px rgba(0,255,106,0.3);
 }
 /* 移动端触摸优化 */
-.ping-card, .theme-btn, .icon-btn, .f-item {
+.ping-card, .icon-btn, .f-item {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
@@ -1489,8 +1514,6 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
   .ping-table-wrap { display: none; }
   .ping-cards { display: grid; }
 }
-body[data-theme="tower"] .ping-table-wrap { display: none; }
-body[data-theme="tower"] .ping-cards { display: grid; }
 .event-filters { display: inline-flex; gap: 6px; align-items: center; }
 .v-long {
   display: inline-block; max-width: 100%;
@@ -1498,113 +1521,6 @@ body[data-theme="tower"] .ping-cards { display: grid; }
   vertical-align: bottom;
 }
 
-/* ---- 竖向居中滚动主题 ----
-   中间半透明卡片；两侧强化矩阵数字雨 */
-body[data-theme="tower"] {
-  overflow-x: hidden;
-  overflow-y: auto;
-  --rain-opacity: 0.48;
-  --panel: rgba(0, 12, 5, 0.55);
-}
-body[data-theme="tower"] #rain {
-  z-index: 0;
-}
-body[data-theme="tower"] .scanlines {
-  opacity: 0.35;
-}
-body[data-theme="tower"] .wrap {
-  max-width: 520px;
-  width: min(520px, calc(100% - 28px));
-  margin: 0 auto;
-  min-height: 100%;
-  padding: 16px 14px calc(120px + env(safe-area-inset-bottom, 0px));
-  align-items: stretch;
-  position: relative;
-  z-index: 2;
-}
-body[data-theme="tower"] header.app {
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 10px;
-  background: rgba(0, 14, 6, 0.58);
-}
-body[data-theme="tower"] header.app h1 {
-  font-size: 14px;
-}
-body[data-theme="tower"] .header-actions {
-  justify-content: center;
-  width: 100%;
-}
-body[data-theme="tower"] .grid {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  width: 100%;
-}
-body[data-theme="tower"] .panel {
-  width: 100%;
-  background: rgba(0, 14, 6, 0.56);
-}
-body[data-theme="tower"] .terminal {
-  grid-column: auto;
-  min-height: 180px;
-  max-height: none;
-}
-body[data-theme="tower"] .term-body {
-  max-height: 280px;
-}
-/* 竖向主题：每一行参数与值横向排列（非上下堆叠） */
-body[data-theme="tower"] .kv {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-body[data-theme="tower"] .kv .item {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px 16px;
-  padding: 8px 10px;
-}
-body[data-theme="tower"] .kv .item .k {
-  display: inline-block;
-  margin-bottom: 0;
-  flex: 0 0 auto;
-  min-width: 5.2em;
-  color: var(--dim);
-  font-size: 11px;
-  white-space: nowrap;
-}
-body[data-theme="tower"] .kv .item .v {
-  display: inline-block;
-  flex: 1 1 auto;
-  text-align: right;
-  font-size: 12px;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-body[data-theme="tower"] .meter .row {
-  grid-template-columns: 56px 1fr 48px;
-}
-body[data-theme="tower"] .scroll-x {
-  overflow-x: auto;
-}
-body[data-theme="tower"] .ping-table {
-  font-size: 10px;
-}
-body[data-theme="tower"] footer.status-bar .footer-inner {
-  justify-content: center;
-}
-@media (max-width: 640px) {
-  body[data-theme="tower"] .wrap {
-    width: min(100%, calc(100% - 16px));
-  }
-  body[data-theme="tower"] {
-    --rain-opacity: 0.36;
-  }
-}
 </style>
 </head>
 <body data-theme="dashboard">
@@ -1612,7 +1528,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
 (function () {
   try {
     var t = document.documentElement.getAttribute("data-theme");
-    if (t === "tower" || t === "dashboard") document.body.setAttribute("data-theme", t);
+    if (t === "dashboard") document.body.setAttribute("data-theme", t);
   } catch (e) {}
 })();
 </script>
@@ -1626,7 +1542,6 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     </div>
     <div class="header-actions">
       <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新数据 (R)" aria-label="立即刷新数据">↻</button>
-      <button type="button" id="themeBtn" class="theme-btn" title="切换布局主题 (T)" aria-label="切换布局主题">竖向主题</button>
       <div id="onlineBadge" class="badge"><span class="dot"></span><span id="onlineText">连接中…</span></div>
     </div>
   </header>
@@ -1642,7 +1557,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         <option value="error">仅错误</option>
       </select>
     </label>
-    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新 · 日期时间为浏览器本地时区</span>
+    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新 · 日期时间为浏览器本地时区</span>
   </div>
 
   <div class="grid">
@@ -1709,7 +1624,6 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var metricsAgeBase = null;
   var pingAgeBase = null;
   var agesAt = 0;
-  var THEME_KEY = "vps-probe-theme";
   var RAIN_KEY = "vps-probe-rain";
   var EVENT_FILTER_KEY = "vps-probe-event-filter";
   var PERF_KEY = "vps-probe-perf";
@@ -1749,14 +1663,6 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   }
 
   function $(id) { return document.getElementById(id); }
-
-  function getTheme() {
-    try {
-      var t = localStorage.getItem(THEME_KEY);
-      if (t === "tower" || t === "dashboard") return t;
-    } catch (e) {}
-    return "dashboard";
-  }
 
   function setRainEnabled(on, skipStore) {
     rainEnabled = !!on;
@@ -1851,29 +1757,6 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     return result;
   }
 
-  function applyTheme(theme) {
-    if (theme !== "tower" && theme !== "dashboard") theme = "dashboard";
-    document.body.setAttribute("data-theme", theme);
-    try { document.documentElement.setAttribute("data-theme", theme); } catch (e) {}
-    try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
-    var btn = $("themeBtn");
-    if (btn) {
-      // 按钮文案表示「切换到」的目标主题
-      // 文案表示「将要切换到」的目标主题
-      btn.textContent = theme === "tower" ? "横向主题" : "竖向主题";
-      btn.setAttribute("aria-pressed", theme === "tower" ? "true" : "false");
-      btn.title = theme === "tower" ? "切换为横向布局" : "切换为竖向居中布局";
-    }
-    // 主题切换后重算数字雨画布
-    if (typeof resizeRain === "function") {
-      try { resizeRain(); } catch (e) {}
-    }
-  }
-
-  function toggleTheme() {
-    applyTheme(getTheme() === "tower" ? "dashboard" : "tower");
-  }
-
   function fmtBytes(n) {
     if (n == null || isNaN(n)) return "—";
     var u = ["B","KB","MB","GB","TB","PB"];
@@ -1926,12 +1809,40 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
   }
 
-  function meterHtml(label, pct, status) {
+  function meterHtml(label, pct, status, sparkArr) {
     var st = status || "ok";
     var p = Math.max(0, Math.min(100, Number(pct) || 0));
+    var spark = sparkArr ? sysSparklineSvg(sparkArr, st) : "";
     return '<div class="row"><span class="label">' + esc(label) + '</span>' +
       '<div class="meter-bar ' + esc(st) + '"><i style="width:' + p.toFixed(1) + '%"></i></div>' +
-      '<span class="pct ' + esc(st) + '">' + p.toFixed(1) + '%</span></div>';
+      '<span class="pct ' + esc(st) + '">' + p.toFixed(1) + '%</span>' +
+      '<span class="meter-spark">' + spark + '</span></div>';
+  }
+
+  /* 系统指标趋势图：固定 0-100% 范围，颜色跟随状态 */
+  function sysSparklineSvg(arr, status) {
+    arr = (arr || []).map(Number).filter(function (x) { return !isNaN(x) && x >= 0; });
+    if (arr.length < 2) return "";
+    var w = 56, h = 16, pad = 1;
+    var pts = [];
+    for (var i = 0; i < arr.length; i++) {
+      var x = pad + (i / (arr.length - 1)) * (w - pad * 2);
+      var y = h - pad - (Math.min(arr[i], 100) / 100) * (h - pad * 2);
+      pts.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    var color = status === "danger" ? "#ff3355" : (status === "warn" ? "#ffcc00" : "#00ff88");
+    var fillId = "sy" + Math.random().toString(36).slice(2, 8);
+    var areaPts = pts.join(" ") + " " + (w - pad).toFixed(1) + "," + (h - pad).toFixed(1) + " " + pad.toFixed(1) + "," + (h - pad).toFixed(1);
+    return '<svg viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
+      '" aria-hidden="true">' +
+      '<defs><linearGradient id="' + fillId + '" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.3"/>' +
+      '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
+      '</linearGradient></defs>' +
+      '<polygon fill="url(#' + fillId + ')" points="' + areaPts + '"/>' +
+      '<polyline fill="none" stroke="' + color +
+      '" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round" points="' +
+      pts.join(" ") + '"/></svg>';
   }
 
   function compactTime(s) {
@@ -1960,7 +1871,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     });
   }
 
-  function renderSystem(sys) {
+  function renderSystem(sys, sysHist) {
     if (!sys || !Object.keys(sys).length) {
       $("sysKv").innerHTML = '<div class="item"><span class="k">状态</span><span class="v">等待首次采集…</span></div>';
       lastSysSig = "";
@@ -1994,9 +1905,10 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       ["上传速率", fmtRate(sys.net_up_rate)],
       ["下载速率", fmtRate(sys.net_down_rate)]
     ];
+    var hSig = sysHist ? (sysHist.cpu.join(",") + "|" + sysHist.mem.join(",") + "|" + sysHist.swap.join(",") + "|" + sysHist.disk.join(",")) : "";
     var sig = items.map(function (it) { return it[0] + "=" + it[1]; }).join("|") +
       "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent +
-      "|" + (sys.runtime || "");
+      "|" + (sys.runtime || "") + "|" + hSig;
     if (sig === lastSysSig) return;
     lastSysSig = sig;
     var frag = document.createDocumentFragment();
@@ -2011,10 +1923,10 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     $("sysKv").innerHTML = "";
     $("sysKv").appendChild(frag);
     $("sysMeters").innerHTML =
-      meterHtml("CPU", sys.cpu_percent, sys.cpu_status) +
-      meterHtml("内存", sys.memory_percent, sys.memory_status) +
-      meterHtml("Swap", sys.swap_percent, sys.swap_status) +
-      meterHtml("磁盘", sys.disk_percent, sys.disk_status);
+      meterHtml("CPU", sys.cpu_percent, sys.cpu_status, sysHist ? sysHist.cpu : null) +
+      meterHtml("内存", sys.memory_percent, sys.memory_status, sysHist ? sysHist.mem : null) +
+      meterHtml("Swap", sys.swap_percent, sys.swap_status, sysHist ? sysHist.swap : null) +
+      meterHtml("磁盘", sys.disk_percent, sys.disk_status, sysHist ? sysHist.disk : null);
   }
 
   function methodLabel(detail) {
@@ -2242,7 +2154,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       st = st.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "").replace(/Z$/, "");
     }
     $("fUpdated").textContent = st;
-    renderSystem(data.system || {});
+    renderSystem(data.system || {}, data.system_history || null);
     // 卡片相对时间：用 ping_age 作统一参考
     if (data.ping && data.ping.targets) {
       var pa = data.ping_age_seconds != null ? Number(data.ping_age_seconds) : null;
@@ -2307,34 +2219,15 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var rainActive = true;
   var lastFrame = 0;
   var frameGap = 66; /* ~15fps */
-  var cachedBounds = null;
   var rainW = 0;
   var rainH = 0;
 
-  function isTowerTheme() {
-    return document.body.getAttribute("data-theme") === "tower";
-  }
-
-  function towerCenterBounds() {
-    var cw = Math.min(520, Math.max(280, window.innerWidth - 28));
-    var left = Math.max(0, (window.innerWidth - cw) / 2);
-    return { left: left, right: left + cw, width: cw };
-  }
-
-  function pickDropX(tower, bounds) {
-    if (tower && bounds && (bounds.left > 24 || bounds.right < rainW - 24)) {
-      if (Math.random() < 0.55 && bounds.left > 24) {
-        return Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
-      }
-      var rc = Math.floor(Math.max(1, (rainW - bounds.right) / fontSize));
-      return bounds.right + Math.floor(Math.random() * rc) * fontSize;
-    }
+  function pickDropX() {
     return Math.floor(Math.random() * Math.max(1, cols)) * fontSize;
   }
 
   function resizeRain() {
     if (reducedMotion || !canvas || !ctx) return;
-    // 固定 dpr=1，Retina 像素量约减半～3/4，显著降卡顿
     var dpr = 1;
     rainW = window.innerWidth || 1;
     rainH = window.innerHeight || 1;
@@ -2344,24 +2237,15 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     canvas.style.height = rainH + "px";
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     var mobile = rainW < 768;
-    var tower = isTowerTheme();
     fontSize = mobile ? 18 : 16;
-    // 更低帧率：移动端 ~10fps，桌面 ~12–15fps
-    frameGap = mobile ? 100 : (tower ? 80 : 66);
+    frameGap = mobile ? 100 : 66;
     cols = Math.floor(rainW / fontSize) || 1;
-    cachedBounds = tower ? towerCenterBounds() : null;
-    // 硬顶数量，避免宽屏雨滴爆炸
-    var n;
-    if (tower) {
-      n = mobile ? 28 : 48;
-    } else {
-      n = mobile ? 22 : 40;
-    }
-    n = Math.min(n, Math.max(12, Math.floor(cols * (tower ? 0.35 : 0.28))));
+    var n = mobile ? 22 : 40;
+    n = Math.min(n, Math.max(12, Math.floor(cols * 0.28)));
     drops = [];
     for (var i = 0; i < n; i++) {
       drops.push({
-        x: pickDropX(tower, cachedBounds),
+        x: pickDropX(),
         y: Math.random() * -80,
         speed: 0.9 + Math.random() * 1.2,
         ch: chars.charAt(i % chars.length),
@@ -2416,8 +2300,6 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     lastFrame = ts;
     var w = rainW;
     var h = rainH;
-    var tower = isTowerTheme();
-    var bounds = tower ? cachedBounds : null;
 
     // 残影一笔带过
     ctx.globalAlpha = 1;
@@ -2434,7 +2316,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       yy = d.y * fontSize;
       if (yy > h) {
         d.y = Math.random() * -12;
-        d.x = pickDropX(tower, bounds);
+        d.x = pickDropX();
         // 偶发换字符，避免每帧 random
         if ((i + (ts | 0)) % 7 === 0) {
           d.ch = chars.charAt((i + (ts | 0)) % chars.length);
@@ -2471,14 +2353,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   });
   window.addEventListener("resize", scheduleResizeRain, { passive: true });
 
-  // 主题 / 工具栏：本地偏好，无配置文件
-  applyTheme(getTheme());
-  var themeBtn = $("themeBtn");
-  if (themeBtn) {
-    themeBtn.addEventListener("click", function () {
-      toggleTheme();
-    });
-  }
+  // 工具栏：本地偏好，无配置文件
   var refreshBtn = $("refreshBtn");
   if (refreshBtn) {
     refreshBtn.addEventListener("click", function () {
@@ -2524,14 +2399,12 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       renderEvents(lastEventsRaw);
     });
   }
-  // 快捷键：T 主题 / R 刷新 / A 动画 / P 性能模式
+  // 快捷键：R 刷新 / A 动画 / P 性能模式
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     var tag = (ev.target && ev.target.tagName) || "";
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-    if (ev.key === "t" || ev.key === "T") {
-      toggleTheme();
-    } else if (ev.key === "r" || ev.key === "R") {
+    if (ev.key === "r" || ev.key === "R") {
       poll();
     } else if (ev.key === "a" || ev.key === "A") {
       if (!reducedMotion && !perfMode) setRainEnabled(!rainEnabled);
