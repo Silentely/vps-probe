@@ -274,6 +274,7 @@ vps-probe/
 ├── probe.py            # 后端 + 内嵌 HTML / CSS / JS（主题切换在此）
 ├── requirements.txt    # 仅 psutil
 ├── Dockerfile          # 轻量镜像、非 root、HEALTHCHECK
+├── LICENSE             # MIT
 ├── .dockerignore
 ├── .gitignore
 └── README.md
@@ -357,10 +358,16 @@ docker rmi vps-probe
 
 ## 许可证
 
-按需自用，可自由修改与分发。
+本项目采用 [MIT License](./LICENSE) 开源。
+
+```text
+Copyright (c) 2026 Silentely
+```
+
+可自由使用、修改、分发与商用；分发时请保留许可证与版权声明。
 
 ---
 
 <p align="center">
-  <sub>Made for simple VPS ops · No config · No database · One file</sub>
+  <sub>MIT · Made for simple VPS ops · No config · No database · One file</sub>
 </p>
