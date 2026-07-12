@@ -271,10 +271,12 @@ vps-probe/
 ├── requirements.txt    # 仅 psutil
 ├── Dockerfile          # 轻量镜像、非 root、HEALTHCHECK
 ├── LICENSE             # MIT
+├── AGENTS.md           # Agent 续作：打磨/测试/推送约定
 ├── .dockerignore
 ├── .gitignore
 └── README.md
 ```
+
 
 
 ---
