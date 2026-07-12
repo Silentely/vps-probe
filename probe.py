@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.4.3"
+VERSION = "1.5.0"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 HOST = "0.0.0.0"
 PORT = 8080
@@ -954,6 +954,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
+<meta name="description" content="VPS Probe — 极简单页 VPS 探针监控" />
 <title>VPS Probe · 矩阵终端</title>
 <script>
 /* 尽早应用主题，避免首屏布局闪烁 */
@@ -974,7 +975,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   --panel-solid: rgba(0, 12, 5, 0.72);
   --border: #00ff6a;
   --text: #b6ffcb;
-  --dim: #3d8f5a;
+  --dim: #4da86a;
   --ok: #00ff88;
   --warn: #ffcc00;
   --danger: #ff3355;
@@ -1020,6 +1021,8 @@ body {
   );
   mix-blend-mode: multiply;
   opacity: 0.55;
+  will-change: auto;
+  contain: strict;
 }
 .wrap {
   position: relative; z-index: 2;
@@ -1050,11 +1053,12 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 10px; border: 1px solid var(--ok); border-radius: 999px;
   color: var(--ok); font-size: 11px;
+  transition: border-color 0.3s, color 0.3s;
 }
 .badge .dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
   box-shadow: 0 0 4px var(--ok);
-  /* 脉冲动画改为静态，减少持续重绘 */
+  transition: background 0.3s, box-shadow 0.3s;
 }
 .badge.offline { border-color: var(--danger); color: var(--danger); }
 .badge.offline .dot { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
@@ -1089,6 +1093,12 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   font-size: 12px; letter-spacing: 0.16em; color: var(--ok);
   margin-bottom: 10px; text-transform: uppercase;
   border-bottom: 1px solid rgba(0,255,106,0.2); padding-bottom: 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.panel h2::before {
+  content: "▸";
+  font-size: 10px;
+  opacity: 0.6;
 }
 .kv {
   display: grid;
@@ -1099,6 +1109,11 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   border: 1px solid rgba(0,255,106,0.12);
   background: rgba(0, 0, 0, 0.18);
   padding: 7px 8px; border-radius: 3px;
+  transition: background 0.2s, border-color 0.2s;
+}
+.kv .item:hover {
+  background: rgba(0, 255, 106, 0.06);
+  border-color: rgba(0,255,106,0.25);
 }
 /* 仪表盘默认：标签在上、值在下 */
 .kv .item .k {
@@ -1118,8 +1133,8 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   display: grid; grid-template-columns: 72px 1fr 52px;
   gap: 8px; align-items: center; margin-bottom: 8px;
 }
-.meter .label { color: var(--dim); font-size: 11px; }
-.meter .pct { text-align: right; font-variant-numeric: tabular-nums; }
+.meter .label { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.meter .pct { text-align: right; font-variant-numeric: tabular-nums; min-width: 42px; }
 /* 进度条专用，类名 meter-bar，避免与底栏冲突 */
 .meter-bar {
   height: 10px; background: rgba(0,40,15,0.8);
@@ -1193,6 +1208,13 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 .term-line .lv.OK { color: var(--ok); }
 .term-line .lv.WARN { color: var(--warn); }
 .term-line .lv.ERROR { color: var(--danger); }
+/* 状态指示器过渡动画 */
+.st.ok, .st.warn, .st.danger, .st.offline {
+  transition: color 0.3s ease;
+}
+.pct.ok, .pct.warn, .pct.danger {
+  transition: color 0.3s ease;
+}
 .cursor {
   display: inline-block; width: 8px; height: 13px;
   background: var(--ok); margin-left: 2px; vertical-align: text-bottom;
@@ -1316,6 +1338,10 @@ footer.status-bar strong {
   border-color: var(--ok);
   box-shadow: 0 0 12px rgba(0,255,136,0.35);
 }
+.theme-btn:active, .icon-btn:active {
+  transform: scale(0.96);
+  box-shadow: 0 0 4px rgba(0,255,106,0.2);
+}
 .theme-btn:focus-visible, .icon-btn:focus-visible {
   outline: 1px solid var(--ok);
   outline-offset: 2px;
@@ -1378,6 +1404,10 @@ footer.status-bar strong {
   background: rgba(0,0,0,0.25);
   border-radius: 4px;
   padding: 4px 8px;
+  transition: border-color 0.2s;
+}
+.ping-summary .ps:hover {
+  border-color: rgba(0,255,106,0.4);
 }
 .ping-summary .ps strong { color: var(--text); font-weight: normal; }
 .ping-summary .ps.ok strong { color: var(--ok); }
@@ -1391,6 +1421,21 @@ footer.status-bar strong {
 }
 .ping-table thead th {
   position: sticky; top: 0; background: rgba(0, 12, 6, 0.95); z-index: 1;
+}
+/* 焦点可见样式：键盘导航 */
+:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 2px;
+}
+button:focus-visible, select:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 2px;
+  box-shadow: 0 0 8px rgba(0,255,106,0.3);
+}
+/* 移动端触摸优化 */
+.ping-card, .theme-btn, .icon-btn, .f-item {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .kbd {
   font-size: 10px; color: var(--dim);
@@ -1413,6 +1458,8 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
 .ping-group h3 {
   font-size: 11px; color: var(--ok); letter-spacing: 0.08em;
   margin-bottom: 6px; font-weight: normal;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0,255,106,0.15);
 }
 .ping-cards {
   display: none;
@@ -1678,21 +1725,17 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   try {
     reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   } catch (e) {}
+  /* 批量读取 localStorage，减少独立 try-catch 开销 */
   try {
-    var rs = localStorage.getItem(RAIN_KEY);
-    if (rs === "0") rainEnabled = false;
-    if (rs === "1") rainEnabled = true;
-  } catch (e) {}
-  try {
-    var ef = localStorage.getItem(EVENT_FILTER_KEY);
-    if (ef === "all" || ef === "warn" || ef === "error") eventFilter = ef;
-  } catch (e) {}
-  try {
-    var pf = localStorage.getItem(PERF_KEY);
-    if (pf === "1") perfMode = true;
-    else if (pf === "0") perfMode = false;
+    var _lsRain = localStorage.getItem(RAIN_KEY);
+    if (_lsRain === "0") rainEnabled = false;
+    else if (_lsRain === "1") rainEnabled = true;
+    var _lsEf = localStorage.getItem(EVENT_FILTER_KEY);
+    if (_lsEf === "all" || _lsEf === "warn" || _lsEf === "error") eventFilter = _lsEf;
+    var _lsPf = localStorage.getItem(PERF_KEY);
+    if (_lsPf === "1") perfMode = true;
+    else if (_lsPf === "0") perfMode = false;
     else {
-      // 首次访问：低配 / 省流 / 减少动效 → 默认性能模式
       var cores = navigator.hardwareConcurrency || 4;
       var saveData = !!(navigator.connection && navigator.connection.saveData);
       if (cores <= 2 || saveData || reducedMotion) perfMode = true;
@@ -1766,11 +1809,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
   }
 
+  var sparkCache = {};
+  var sparkCacheKeys = [];
+  var SPARK_CACHE_MAX = 20;
   function sparklineSvg(arr) {
     arr = (arr || []).map(Number).filter(function (x) { return !isNaN(x) && x >= 0; });
     if (arr.length < 2) {
       return '<span class="spark-empty" style="color:var(--dim);font-size:10px">—</span>';
     }
+    var cacheKey = arr.join(",");
+    if (sparkCache[cacheKey]) return sparkCache[cacheKey];
     var w = 72, h = 20, pad = 1.5;
     var min = Math.min.apply(null, arr);
     var max = Math.max.apply(null, arr);
@@ -1785,7 +1833,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var color = last >= 300 ? "#ff3355" : (last >= 100 ? "#ffcc00" : "#00ff88");
     var fillId = "sf" + Math.random().toString(36).slice(2, 8);
     var areaPts = pts.join(" ") + " " + (w - pad).toFixed(1) + "," + (h - pad).toFixed(1) + " " + pad.toFixed(1) + "," + (h - pad).toFixed(1);
-    return '<svg class="spark" viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
+    var result = '<svg class="spark" viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
       '" aria-hidden="true">' +
       '<defs><linearGradient id="' + fillId + '" x1="0" y1="0" x2="0" y2="1">' +
       '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.3"/>' +
@@ -1795,6 +1843,12 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       '<polyline fill="none" stroke="' + color +
       '" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" points="' +
       pts.join(" ") + '"/></svg>';
+    sparkCache[cacheKey] = result;
+    sparkCacheKeys.push(cacheKey);
+    if (sparkCacheKeys.length > SPARK_CACHE_MAX) {
+      delete sparkCache[sparkCacheKeys.shift()];
+    }
+    return result;
   }
 
   function applyTheme(theme) {
@@ -1825,7 +1879,9 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var u = ["B","KB","MB","GB","TB","PB"];
     var i = 0; var v = Number(n);
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return v.toFixed(v >= 10 || i === 0 ? 1 : 2) + " " + u[i];
+    /* 自适应精度：大值保留 1 位小数，小值保留 2 位 */
+    if (i === 0) return v + " B";
+    return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + " " + u[i];
   }
   function fmtRate(bps) {
     if (bps == null || isNaN(bps)) return "—";
@@ -1943,10 +1999,17 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       "|" + (sys.runtime || "");
     if (sig === lastSysSig) return;
     lastSysSig = sig;
-    $("sysKv").innerHTML = items.map(function (it) {
-      var longCls = (it[0] === "CPU 型号" || String(it[1]).length > 28) ? ' class="v v-long" title="' + esc(it[1]) + '"' : ' class="v"';
-      return '<div class="item"><span class="k">' + esc(it[0]) + '</span><span' + longCls + '>' + esc(it[1]) + '</span></div>';
-    }).join("");
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var div = document.createElement("div");
+      div.className = "item";
+      var longCls = (it[0] === "CPU 型号" || String(it[1]).length > 28) ? "v v-long" : "v";
+      div.innerHTML = '<span class="k">' + esc(it[0]) + '</span><span class="' + longCls + '" title="' + esc(it[1]) + '">' + esc(it[1]) + '</span>';
+      frag.appendChild(div);
+    }
+    $("sysKv").innerHTML = "";
+    $("sysKv").appendChild(frag);
     $("sysMeters").innerHTML =
       meterHtml("CPU", sys.cpu_percent, sys.cpu_status) +
       meterHtml("内存", sys.memory_percent, sys.memory_status) +
@@ -2079,15 +2142,30 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     if (sig === lastEventsSig && term.childNodes.length) return;
     lastEventsSig = sig;
     var nearBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 48;
-    var html = list.slice().reverse().map(function (e) {
-      return '<div class="term-line"><span class="ts">[' + esc(e.ts) + ']</span>' +
-        '<span class="lv ' + esc(e.level) + '">' + esc(e.level) + '</span>' +
-        '<span class="msg">' + esc(e.message) + '</span></div>';
-    }).join("");
-    if (!list.length) {
-      html = '<div class="term-line"><span class="ts">#</span><span class="msg"> 当前过滤下无事件</span></div>';
+    var frag = document.createDocumentFragment();
+    var reversed = list.slice().reverse();
+    if (!reversed.length) {
+      var emptyDiv = document.createElement("div");
+      emptyDiv.className = "term-line";
+      emptyDiv.innerHTML = '<span class="ts">#</span><span class="msg"> 当前过滤下无事件</span>';
+      frag.appendChild(emptyDiv);
     }
-    term.innerHTML = html + '<div class="term-line"><span class="ts">$</span> <span class="cursor"></span></div>';
+    for (var i = 0; i < reversed.length; i++) {
+      var e = reversed[i];
+      var div = document.createElement("div");
+      div.className = "term-line";
+      var icon = e.level === "ERROR" ? "✗" : e.level === "WARN" ? "⚠" : e.level === "OK" ? "✓" : "●";
+      div.innerHTML = '<span class="ts">[' + esc(e.ts) + ']</span>' +
+        '<span class="lv ' + esc(e.level) + '">' + icon + ' ' + esc(e.level) + '</span>' +
+        '<span class="msg">' + esc(e.message) + '</span>';
+      frag.appendChild(div);
+    }
+    var cursorDiv = document.createElement("div");
+    cursorDiv.className = "term-line";
+    cursorDiv.innerHTML = '<span class="ts">$</span> <span class="cursor"></span>';
+    frag.appendChild(cursorDiv);
+    term.innerHTML = "";
+    term.appendChild(frag);
     if (nearBottom || term.scrollTop === 0) {
       term.scrollTop = term.scrollHeight;
     }
@@ -2186,25 +2264,31 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   }
 
   var pollInFlight = false;
+  var pollFailCount = 0;
   function poll() {
     if (pollInFlight) return;
     pollInFlight = true;
     var t0 = performance.now();
-    fetch("/api/status", { cache: "no-store" })
+    var ctrl = new AbortController();
+    var tid = setTimeout(function () { ctrl.abort(); }, 8000);
+    fetch("/api/status", { cache: "no-store", signal: ctrl.signal })
       .then(function (r) {
+        clearTimeout(tid);
         if (!r.ok) throw new Error("http " + r.status);
         return r.json();
       })
       .then(function (data) {
         var reqMs = performance.now() - t0;
         if (!data || data.ok === false) throw new Error("bad payload");
+        pollFailCount = 0;
         setOnline(true);
         applyPayload(data, reqMs);
       })
       .catch(function () {
+        clearTimeout(tid);
+        pollFailCount++;
         setOnline(false);
         if (lastOk) {
-          // 保留最后成功数据，仅更新请求失败态
           $("fReq").textContent = (performance.now() - t0).toFixed(1);
         }
       })
@@ -2298,6 +2382,29 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     rainRaf = requestAnimationFrame(drawRain);
   }
 
+  /* 预渲染字符到离屏 canvas，减少每帧 fillText 调用；限制缓存大小 */
+  var charCache = {};
+  var charCacheKeys = [];
+  var CHAR_CACHE_MAX = 40;
+  function getCharCanvas(ch) {
+    var key = ch + "_" + fontSize;
+    if (charCache[key]) return charCache[key];
+    var c = document.createElement("canvas");
+    c.width = fontSize + 2;
+    c.height = fontSize + 2;
+    var cx = c.getContext("2d");
+    cx.fillStyle = "#00ff6a";
+    cx.font = fontSize + "px monospace";
+    cx.textBaseline = "top";
+    cx.fillText(ch, 1, 1);
+    charCache[key] = c;
+    charCacheKeys.push(key);
+    if (charCacheKeys.length > CHAR_CACHE_MAX) {
+      delete charCache[charCacheKeys.shift()];
+    }
+    return c;
+  }
+
   function drawRain(ts) {
     rainRaf = 0;
     if (reducedMotion || !ctx || !rainEnabled) return;
@@ -2316,14 +2423,13 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     ctx.globalAlpha = 1;
     ctx.fillStyle = "rgba(2, 6, 4, 0.18)";
     ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = "#00ff6a";
-    ctx.font = fontSize + "px monospace";
 
-    var i, d, yy;
+    var i, d, yy, cc;
     for (i = 0; i < drops.length; i++) {
       d = drops[i];
       ctx.globalAlpha = d.alpha;
-      ctx.fillText(d.ch, d.x, d.y * fontSize);
+      cc = getCharCanvas(d.ch);
+      ctx.drawImage(cc, d.x, d.y * fontSize);
       d.y += d.speed;
       yy = d.y * fontSize;
       if (yy > h) {
@@ -2363,7 +2469,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
     resetPollTimer();
   });
-  window.addEventListener("resize", scheduleResizeRain);
+  window.addEventListener("resize", scheduleResizeRain, { passive: true });
 
   // 主题 / 工具栏：本地偏好，无配置文件
   applyTheme(getTheme());
