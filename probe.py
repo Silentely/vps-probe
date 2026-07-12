@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -362,24 +362,32 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
     except Exception:
         processes = 0
 
-    # Network totals + rates
+    # Network totals + rates（排除 lo，更接近「外网向」体感）
     net_sent = net_recv = 0
     up_rate = down_rate = 0.0
     try:
-        io = psutil.net_io_counters()
-        if io is not None:
-            net_sent = int(io.bytes_sent)
-            net_recv = int(io.bytes_recv)
-            now = time.time()
-            if _prev_net is not None:
-                ps, pr, pt = _prev_net
-                dt = max(now - pt, 1e-6)
-                # 计数器重置时避免负速率
-                if net_sent >= ps:
-                    up_rate = (net_sent - ps) / dt
-                if net_recv >= pr:
-                    down_rate = (net_recv - pr) / dt
-            _prev_net = (net_sent, net_recv, now)
+        pernic = psutil.net_io_counters(pernic=True) or {}
+        if pernic:
+            for name, io in pernic.items():
+                n = (name or "").lower()
+                if n == "lo" or n.startswith("lo:") or n.startswith("loop"):
+                    continue
+                net_sent += int(io.bytes_sent)
+                net_recv += int(io.bytes_recv)
+        else:
+            io = psutil.net_io_counters()
+            if io is not None:
+                net_sent = int(io.bytes_sent)
+                net_recv = int(io.bytes_recv)
+        now = time.time()
+        if _prev_net is not None:
+            ps, pr, pt = _prev_net
+            dt = max(now - pt, 1e-6)
+            if net_sent >= ps:
+                up_rate = (net_sent - ps) / dt
+            if net_recv >= pr:
+                down_rate = (net_recv - pr) / dt
+        _prev_net = (net_sent, net_recv, now)
     except Exception:
         pass
 
@@ -430,6 +438,7 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "net_bytes_recv": net_recv,
         "net_up_rate": round(up_rate, 1),
         "net_down_rate": round(down_rate, 1),
+        "net_exclude_loopback": True,
         "timezone": _tz_label(),
     }
 
@@ -722,8 +731,10 @@ def start_workers() -> None:
         _workers_started = True
         rt = detect_runtime()
         add_event("OK", f"探针服务启动 v{VERSION}（{('容器' if rt == 'container' else '宿主机')}模式）", dedup_key="boot")
-        # 启动时先同步采一次，避免空数据
+        # 启动时采两次：第二次 CPU 非阻塞采样更稳
         try:
+            data, cms = collect_metrics()
+            time.sleep(0.2)
             data, cms = collect_metrics()
             with _state_lock:
                 global _metrics, _metrics_collect_ms, _metrics_updated_at
@@ -770,6 +781,18 @@ def build_status_payload() -> Dict[str, Any]:
                     }
                 )
         runtime = detect_runtime()
+        online_n = sum(1 for t in targets if t.get("online"))
+        online_avgs = [
+            float(t["avg_ms"])
+            for t in targets
+            if t.get("online") and t.get("avg_ms") is not None
+        ]
+        ping_summary = {
+            "total": len(targets),
+            "online": online_n,
+            "offline": max(0, len(targets) - online_n),
+            "avg_ms": round(sum(online_avgs) / len(online_avgs), 1) if online_avgs else None,
+        }
         payload = {
             "ok": True,
             "version": VERSION,
@@ -789,6 +812,7 @@ def build_status_payload() -> Dict[str, Any]:
                 "available": bool(_ping_available) if _ping_available is not None else None,
                 "icmp_available": bool(_ping_available) if _ping_available is not None else None,
                 "tcp_fallback": True,
+                "summary": ping_summary,
                 "targets": targets,
             },
             "events": list(_events)[:EVENT_MAX],
@@ -1267,8 +1291,38 @@ footer.status-bar strong {
   border-radius: 4px;
   padding: 3px 6px;
 }
-.toolbar .hint { color: var(--dim); font-size: 10px; margin-left: auto; }
+.toolbar .hint { color: var(--dim); font-size: 10px; margin-left: auto; max-width: 46%; }
+@media (max-width: 720px) {
+  .toolbar .hint { max-width: 100%; margin-left: 0; }
+}
+.ping-summary {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+  font-size: 11px; color: var(--dim);
+}
+.ping-summary .ps {
+  border: 1px solid rgba(0,255,106,0.2);
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+.ping-summary .ps strong { color: var(--text); font-weight: normal; }
+.ping-summary .ps.ok strong { color: var(--ok); }
+.ping-summary .ps.warn strong { color: var(--warn); }
+.ping-summary .ps.danger strong { color: var(--danger); }
 .ping-groups { display: flex; flex-direction: column; gap: 12px; }
+.ping-card .soft {
+  display: inline-block; margin-left: 4px; font-size: 9px;
+  color: var(--warn); border: 1px solid rgba(255,204,0,0.3);
+  border-radius: 3px; padding: 0 4px; vertical-align: middle;
+}
+.ping-table thead th {
+  position: sticky; top: 0; background: rgba(0, 12, 6, 0.95); z-index: 1;
+}
+.kbd {
+  font-size: 10px; color: var(--dim);
+  border: 1px solid rgba(0,255,106,0.25);
+  border-radius: 3px; padding: 0 4px; margin: 0 2px;
+}
 .ping-group h3 {
   font-size: 11px; color: var(--ok); letter-spacing: 0.08em;
   margin-bottom: 6px; font-weight: normal;
@@ -1448,18 +1502,19 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         <option value="error">仅错误</option>
       </select>
     </label>
-    <span class="hint" id="runtimeHint">运行模式检测中…</span>
+    <span class="hint" id="runtimeHint">运行模式检测中… · 快捷键 <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">R</span>刷新</span>
   </div>
 
   <div class="grid">
     <section class="panel" id="sysPanel">
       <h2>01 // 系统性能 <span class="mode-chip host" id="runtimeChip" style="display:none"></span></h2>
-      <div class="kv" id="sysKv"></div>
+      <div class="kv" id="sysKv"><div class="item"><span class="k">状态</span><span class="v">加载中…</span></div></div>
       <div class="meter" id="sysMeters"></div>
     </section>
 
     <section class="panel" id="pingPanel">
       <h2 id="pingTitle">02 // 外部探测</h2>
+      <div class="ping-summary" id="pingSummary"></div>
       <div class="ping-groups" id="pingGroups"></div>
       <div class="scroll-x ping-table-wrap">
         <table class="ping-table">
@@ -1511,6 +1566,9 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var clockTimer = null;
   var serviceUptimeBase = 0;
   var serviceUptimeAt = 0;
+  var metricsAgeBase = null;
+  var pingAgeBase = null;
+  var agesAt = 0;
   var THEME_KEY = "vps-probe-theme";
   var RAIN_KEY = "vps-probe-rain";
   var EVENT_FILTER_KEY = "vps-probe-event-filter";
@@ -1653,6 +1711,25 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     return m ? m[1] : s;
   }
 
+  function relativeAge(sec) {
+    if (sec == null || isNaN(sec)) return "—";
+    sec = Math.max(0, Number(sec));
+    if (sec < 1.5) return "刚刚";
+    if (sec < 60) return sec.toFixed(0) + " 秒前";
+    if (sec < 3600) return Math.floor(sec / 60) + " 分前";
+    return (sec / 3600).toFixed(1) + " 时前";
+  }
+
+  function sortTargets(list) {
+    return (list || []).slice().sort(function (a, b) {
+      if (!!a.online !== !!b.online) return a.online ? -1 : 1;
+      var aa = a.current_ms != null ? Number(a.current_ms) : 1e9;
+      var bb = b.current_ms != null ? Number(b.current_ms) : 1e9;
+      if (aa !== bb) return aa - bb;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  }
+
   function renderSystem(sys) {
     if (!sys || !Object.keys(sys).length) {
       $("sysKv").innerHTML = '<div class="item"><span class="k">状态</span><span class="v">等待首次采集…</span></div>';
@@ -1712,19 +1789,40 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     return "—";
   }
 
+  function renderPingSummary(ping) {
+    var el = $("pingSummary");
+    if (!el) return;
+    var s = (ping && ping.summary) || {};
+    var total = s.total != null ? s.total : ((ping && ping.targets) || []).length;
+    var online = s.online != null ? s.online : 0;
+    var offline = s.offline != null ? s.offline : Math.max(0, total - online);
+    var avg = s.avg_ms != null ? Number(s.avg_ms).toFixed(1) + " ms" : "—";
+    var ratio = total ? online / total : 0;
+    var cls = ratio >= 0.85 ? "ok" : (ratio >= 0.5 ? "warn" : "danger");
+    el.innerHTML =
+      '<span class="ps ' + cls + '">在线 <strong>' + online + "/" + total + "</strong></span>" +
+      '<span class="ps">离线 <strong>' + offline + "</strong></span>" +
+      '<span class="ps">在线均延迟 <strong>' + esc(avg) + "</strong></span>" +
+      (ping && ping.icmp_available === false
+        ? '<span class="ps warn">模式 <strong>TCP 回退</strong></span>'
+        : '<span class="ps">模式 <strong>ICMP+TCP</strong></span>');
+  }
+
   function renderPing(ping) {
     var body = $("pingBody");
     var groupsEl = $("pingGroups");
     if (!ping) {
       body.innerHTML = '<tr><td colspan="11">等待数据…</td></tr>';
       if (groupsEl) groupsEl.innerHTML = "";
+      if ($("pingSummary")) $("pingSummary").innerHTML = "";
       lastPingSig = "";
       return;
     }
-    var targets = ping.targets || [];
+    var targets = sortTargets(ping.targets || []);
+    renderPingSummary(ping);
     if ($("pingTitle")) {
       var onlineN = targets.filter(function (t) { return t.online; }).length;
-      var mode = ping.icmp_available === false ? "（TCP 回退）" : "";
+      var mode = ping.icmp_available === false ? " · TCP 回退" : "";
       $("pingTitle").textContent = "02 // 外部探测 · " + onlineN + "/" + targets.length + " 在线" + mode;
     }
     var sig = targets.map(function (t) {
@@ -1738,9 +1836,10 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       var st = t.status || (t.online ? "ok" : "offline");
       var stLabel = t.online ? "在线" : (st === "unavailable" ? "不可用" : (st === "pending" ? "等待" : "不可达"));
       var g = t.group === "dns" ? "DNS" : "网站";
+      var soft = t.soft_alert ? " · 弱网" : "";
       return "<tr>" +
         "<td>" + esc(g) + "</td>" +
-        "<td>" + esc(t.name) + "</td>" +
+        "<td>" + esc(t.name) + (t.soft_alert ? ' <span class="soft">弱网</span>' : "") + "</td>" +
         '<td class="host" title="' + esc(t.host) + '">' + esc(t.host) + "</td>" +
         "<td>" + esc(t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : "—") + "</td>" +
         "<td>" + esc(ms(t.min_ms)) + "</td>" +
@@ -1748,7 +1847,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         "<td>" + esc(ms(t.avg_ms)) + "</td>" +
         "<td>" + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(1) + "%" : "—") + "</td>" +
         '<td class="st ' + esc(st) + '">' + esc(stLabel) + "</td>" +
-        "<td>" + esc(methodLabel(t.detail)) + "</td>" +
+        "<td>" + esc(methodLabel(t.detail)) + esc(soft) + "</td>" +
         "<td title=\"" + esc(t.last_check || "") + "\">" + esc(compactTime(t.last_check)) + "</td>" +
         "</tr>";
     });
@@ -1766,13 +1865,15 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
           var st = t.status || (t.online ? "ok" : "offline");
           var cls = "ping-card " + (t.online ? (st === "warn" || st === "danger" ? st : "ok") : "offline");
           var cur = t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : (t.online ? "—" : "不可达");
-          return '<div class="' + cls + '"><div class="name">' + esc(t.name) + '</div>' +
+          var soft = t.soft_alert ? '<span class="soft">弱网</span>' : "";
+          return '<div class="' + cls + '"><div class="name">' + esc(t.name) + soft + '</div>' +
             '<div class="host">' + esc(t.host) + '</div>' +
             '<div class="ms">' + esc(cur) + '</div>' +
             '<div class="meta">丢包 ' + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(0) + "%" : "—") +
-            " · " + esc(methodLabel(t.detail)) + "</div></div>";
+            " · " + esc(methodLabel(t.detail)) +
+            " · " + esc(relativeAge(t._age)) + "</div></div>";
         }).join("");
-        return '<div class="ping-group"><h3>' + title + '</h3><div class="ping-cards">' + cards + "</div></div>";
+        return '<div class="ping-group"><h3>' + title + " · " + buckets[g].length + '</h3><div class="ping-cards">' + cards + "</div></div>";
       }).join("");
       groupsEl.innerHTML = html;
     }
@@ -1826,6 +1927,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       var elapsed = (Date.now() - serviceUptimeAt) / 1000;
       $("fUptime").textContent = fmtUptime(serviceUptimeBase + elapsed);
     }
+    tickAges();
   }
 
   function applyRuntimeUi(data) {
@@ -1862,6 +1964,9 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     lastOk = data;
     serviceUptimeBase = data.uptime_seconds || 0;
     serviceUptimeAt = Date.now();
+    metricsAgeBase = data.metrics_age_seconds != null ? Number(data.metrics_age_seconds) : null;
+    pingAgeBase = data.ping_age_seconds != null ? Number(data.ping_age_seconds) : null;
+    agesAt = Date.now();
     $("fVer").textContent = data.version || "—";
     if ($("hdrVer")) $("hdrVer").textContent = "v" + (data.version || "—");
     var disp = (data.system && (data.system.hostname_display || data.system.hostname)) || "";
@@ -1869,10 +1974,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     applyRuntimeUi(data);
     $("fCollect").textContent = data.collect_ms != null ? Number(data.collect_ms).toFixed(1) : "—";
     $("fReq").textContent = reqMs != null ? reqMs.toFixed(1) : "—";
-    $("fAge").textContent = data.metrics_age_seconds != null ? Number(data.metrics_age_seconds).toFixed(1) : "—";
-    if ($("fPingAge")) {
-      $("fPingAge").textContent = data.ping_age_seconds != null ? Number(data.ping_age_seconds).toFixed(1) : "—";
-    }
+    tickAges();
     if ($("fTz")) {
       $("fTz").textContent = data.timezone || (data.system && data.system.timezone) || "—";
     }
@@ -1883,8 +1985,24 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     }
     $("fUpdated").textContent = st;
     renderSystem(data.system || {});
+    // 卡片相对时间：用 ping_age 作统一参考
+    if (data.ping && data.ping.targets) {
+      var pa = data.ping_age_seconds != null ? Number(data.ping_age_seconds) : null;
+      data.ping.targets.forEach(function (t) { t._age = pa; });
+    }
     renderPing(data.ping);
     renderEvents(data.events);
+  }
+
+  function tickAges() {
+    if (!agesAt) return;
+    var elapsed = (Date.now() - agesAt) / 1000;
+    if (metricsAgeBase != null && $("fAge")) {
+      $("fAge").textContent = (metricsAgeBase + elapsed).toFixed(1);
+    }
+    if (pingAgeBase != null && $("fPingAge")) {
+      $("fPingAge").textContent = (pingAgeBase + elapsed).toFixed(1);
+    }
   }
 
   var pollInFlight = false;
