@@ -33,7 +33,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.4.1"
+VERSION = "1.4.2"
+SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -758,13 +759,18 @@ def build_status_payload() -> Dict[str, Any]:
     with _state_lock:
         targets = []
         for t in PING_TARGETS:
-            r = _ping_results.get(t["id"])
+            tid = t["id"]
+            r = _ping_results.get(tid)
+            hist = list(_ping_history.get(tid, []))[-SPARK_HISTORY:]
+            history_ms = [round(float(x), 1) for x in hist]
             if r:
-                targets.append(dict(r))
+                row = dict(r)
+                row["history_ms"] = history_ms
+                targets.append(row)
             else:
                 targets.append(
                     {
-                        "id": t["id"],
+                        "id": tid,
                         "name": t["name"],
                         "host": t["host"],
                         "group": t.get("group") or "web",
@@ -778,6 +784,7 @@ def build_status_payload() -> Dict[str, Any]:
                         "status": "pending",
                         "last_check": None,
                         "detail": "pending",
+                        "history_ms": history_ms,
                     }
                 )
         runtime = detect_runtime()
@@ -1323,6 +1330,19 @@ footer.status-bar strong {
   border: 1px solid rgba(0,255,106,0.25);
   border-radius: 3px; padding: 0 4px; margin: 0 2px;
 }
+.spark {
+  display: block;
+  margin-top: 6px;
+  width: 100%;
+  max-width: 96px;
+  height: 22px;
+  opacity: 0.9;
+}
+.spark-cell { min-width: 80px; }
+body.perf-mode .scanlines { display: none !important; }
+body.perf-mode #rain { display: none !important; opacity: 0 !important; }
+body.perf-mode .panel { box-shadow: none; }
+body.perf-mode .toolbar .hint .kbd { display: none; }
 .ping-group h3 {
   font-size: 11px; color: var(--ok); letter-spacing: 0.08em;
   margin-bottom: 6px; font-weight: normal;
@@ -1494,6 +1514,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   <div id="errBanner" class="err-banner">与后端连接异常，正在重试并保留最后成功数据…</div>
 
   <div class="toolbar" id="toolbar">
+    <label title="关闭动画、放慢刷新，适合低配/卡顿时"><input type="checkbox" id="perfToggle" /> 性能模式</label>
     <label title="关闭可进一步降低卡顿"><input type="checkbox" id="rainToggle" checked /> 背景动画</label>
     <label class="event-filters">事件
       <select id="eventFilter" title="过滤事件等级">
@@ -1502,7 +1523,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         <option value="error">仅错误</option>
       </select>
     </label>
-    <span class="hint" id="runtimeHint">运行模式检测中… · 快捷键 <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">R</span>刷新</span>
+    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">T</span>主题 <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新</span>
   </div>
 
   <div class="grid">
@@ -1520,7 +1541,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         <table class="ping-table">
           <thead>
             <tr>
-              <th>分组</th><th>目标</th><th>主机</th><th>当前</th><th>最低</th><th>最高</th>
+              <th>分组</th><th>目标</th><th>主机</th><th>当前</th><th>趋势</th><th>最低</th><th>最高</th>
               <th>平均</th><th>丢包</th><th>状态</th><th>方式</th><th>检测时间</th>
             </tr>
           </thead>
@@ -1560,7 +1581,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var lastEventsSig = "";
   var lastSysSig = "";
   var lastPingSig = "";
-  var pollMs = 3000;          /* 降轮询频率，减轻主线程 */
+  var pollMs = 3000;
   var pollMsHidden = 8000;
   var timer = null;
   var clockTimer = null;
@@ -1572,12 +1593,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var THEME_KEY = "vps-probe-theme";
   var RAIN_KEY = "vps-probe-rain";
   var EVENT_FILTER_KEY = "vps-probe-event-filter";
+  var PERF_KEY = "vps-probe-perf";
   var reducedMotion = false;
   var rainEnabled = true;
+  var perfMode = false;
   var eventFilter = "warn";
   var lastEventsRaw = [];
   var rainRaf = 0;
   var resizeTimer = 0;
+  var pollMsNormal = 3000;
+  var pollMsPerf = 5000;
   try {
     reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   } catch (e) {}
@@ -1590,6 +1615,23 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var ef = localStorage.getItem(EVENT_FILTER_KEY);
     if (ef === "all" || ef === "warn" || ef === "error") eventFilter = ef;
   } catch (e) {}
+  try {
+    var pf = localStorage.getItem(PERF_KEY);
+    if (pf === "1") perfMode = true;
+    else if (pf === "0") perfMode = false;
+    else {
+      // 首次访问：低配 / 省流 / 减少动效 → 默认性能模式
+      var cores = navigator.hardwareConcurrency || 4;
+      var saveData = !!(navigator.connection && navigator.connection.saveData);
+      if (cores <= 2 || saveData || reducedMotion) perfMode = true;
+    }
+  } catch (e) {}
+  if (perfMode) {
+    rainEnabled = false;
+    pollMs = pollMsPerf;
+  } else {
+    pollMs = pollMsNormal;
+  }
 
   function $(id) { return document.getElementById(id); }
 
@@ -1601,12 +1643,17 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     return "dashboard";
   }
 
-  function setRainEnabled(on) {
+  function setRainEnabled(on, skipStore) {
     rainEnabled = !!on;
-    try { localStorage.setItem(RAIN_KEY, rainEnabled ? "1" : "0"); } catch (e) {}
+    if (!skipStore) {
+      try { localStorage.setItem(RAIN_KEY, rainEnabled ? "1" : "0"); } catch (e) {}
+    }
     var tg = $("rainToggle");
-    if (tg) tg.checked = rainEnabled;
-    if (!rainEnabled || reducedMotion) {
+    if (tg) {
+      tg.checked = rainEnabled;
+      tg.disabled = !!(perfMode || reducedMotion);
+    }
+    if (!rainEnabled || reducedMotion || perfMode) {
       stopRainLoop();
       if (canvas && ctx) {
         try {
@@ -1617,10 +1664,57 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       }
       if (canvas) canvas.style.opacity = "0";
     } else {
-      if (canvas) canvas.style.opacity = "";
+      if (canvas) {
+        canvas.style.display = "";
+        canvas.style.opacity = "";
+      }
       resizeRain();
       if (document.visibilityState === "visible") startRainLoop();
     }
+  }
+
+  function setPerfMode(on) {
+    perfMode = !!on;
+    try { localStorage.setItem(PERF_KEY, perfMode ? "1" : "0"); } catch (e) {}
+    document.body.classList.toggle("perf-mode", perfMode);
+    var pt = $("perfToggle");
+    if (pt) pt.checked = perfMode;
+    pollMs = perfMode ? pollMsPerf : pollMsNormal;
+    resetPollTimer();
+    if (perfMode) {
+      setRainEnabled(false, true);
+    } else {
+      // 退出性能模式：恢复用户动画偏好（未显式关过则开启）
+      var wantRain = true;
+      try {
+        var rs2 = localStorage.getItem(RAIN_KEY);
+        if (rs2 === "0") wantRain = false;
+      } catch (e) {}
+      if (!reducedMotion) setRainEnabled(wantRain, true);
+    }
+  }
+
+  function sparklineSvg(arr) {
+    arr = (arr || []).map(Number).filter(function (x) { return !isNaN(x) && x >= 0; });
+    if (arr.length < 2) {
+      return '<span class="spark-empty" style="color:var(--dim);font-size:10px">—</span>';
+    }
+    var w = 72, h = 20, pad = 1.5;
+    var min = Math.min.apply(null, arr);
+    var max = Math.max.apply(null, arr);
+    if (max <= min) max = min + 1;
+    var pts = [];
+    for (var i = 0; i < arr.length; i++) {
+      var x = pad + (i / (arr.length - 1)) * (w - pad * 2);
+      var y = h - pad - ((arr[i] - min) / (max - min)) * (h - pad * 2);
+      pts.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    var last = arr[arr.length - 1];
+    var color = last >= 300 ? "#ff3355" : (last >= 100 ? "#ffcc00" : "#00ff88");
+    return '<svg class="spark" viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
+      '" aria-hidden="true"><polyline fill="none" stroke="' + color +
+      '" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" points="' +
+      pts.join(" ") + '"/></svg>';
   }
 
   function applyTheme(theme) {
@@ -1812,7 +1906,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     var body = $("pingBody");
     var groupsEl = $("pingGroups");
     if (!ping) {
-      body.innerHTML = '<tr><td colspan="11">等待数据…</td></tr>';
+      body.innerHTML = '<tr><td colspan="12">等待数据…</td></tr>';
       if (groupsEl) groupsEl.innerHTML = "";
       if ($("pingSummary")) $("pingSummary").innerHTML = "";
       lastPingSig = "";
@@ -1826,7 +1920,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       $("pingTitle").textContent = "02 // 外部探测 · " + onlineN + "/" + targets.length + " 在线" + mode;
     }
     var sig = targets.map(function (t) {
-      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.detail, t.last_check].join(":");
+      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.detail, t.last_check, (t.history_ms || []).join(",")].join(":");
     }).join("|");
     if (sig === lastPingSig) return;
     lastPingSig = sig;
@@ -1842,6 +1936,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         "<td>" + esc(t.name) + (t.soft_alert ? ' <span class="soft">弱网</span>' : "") + "</td>" +
         '<td class="host" title="' + esc(t.host) + '">' + esc(t.host) + "</td>" +
         "<td>" + esc(t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : "—") + "</td>" +
+        '<td class="spark-cell">' + sparklineSvg(t.history_ms) + "</td>" +
         "<td>" + esc(ms(t.min_ms)) + "</td>" +
         "<td>" + esc(ms(t.max_ms)) + "</td>" +
         "<td>" + esc(ms(t.avg_ms)) + "</td>" +
@@ -1851,7 +1946,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
         "<td title=\"" + esc(t.last_check || "") + "\">" + esc(compactTime(t.last_check)) + "</td>" +
         "</tr>";
     });
-    body.innerHTML = rows.join("") || '<tr><td colspan="11">无目标</td></tr>';
+    body.innerHTML = rows.join("") || '<tr><td colspan="12">无目标</td></tr>';
 
     if (groupsEl) {
       var buckets = { dns: [], web: [] };
@@ -1869,6 +1964,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
           return '<div class="' + cls + '"><div class="name">' + esc(t.name) + soft + '</div>' +
             '<div class="host">' + esc(t.host) + '</div>' +
             '<div class="ms">' + esc(cur) + '</div>' +
+            sparklineSvg(t.history_ms) +
             '<div class="meta">丢包 ' + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(0) + "%" : "—") +
             " · " + esc(methodLabel(t.detail)) +
             " · " + esc(relativeAge(t._age)) + "</div></div>";
@@ -2203,14 +2299,30 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   }
   var rainToggle = $("rainToggle");
   if (rainToggle) {
-    rainToggle.checked = rainEnabled && !reducedMotion;
+    rainToggle.checked = rainEnabled && !reducedMotion && !perfMode;
     if (reducedMotion) {
       rainToggle.disabled = true;
       rainToggle.parentElement && (rainToggle.parentElement.title = "系统已开启「减少动态效果」");
     }
     rainToggle.addEventListener("change", function () {
+      if (perfMode) {
+        rainToggle.checked = false;
+        return;
+      }
       setRainEnabled(rainToggle.checked);
     });
+  }
+  var perfToggle = $("perfToggle");
+  if (perfToggle) {
+    perfToggle.checked = perfMode;
+    perfToggle.addEventListener("change", function () {
+      setPerfMode(perfToggle.checked);
+    });
+  }
+  // 应用初始性能/动画状态
+  document.body.classList.toggle("perf-mode", perfMode);
+  if (perfMode || reducedMotion || !rainEnabled) {
+    setRainEnabled(false, true);
   }
   var eventFilterEl = $("eventFilter");
   if (eventFilterEl) {
@@ -2222,7 +2334,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       renderEvents(lastEventsRaw);
     });
   }
-  // 快捷键：T 主题 / R 刷新 / A 动画开关
+  // 快捷键：T 主题 / R 刷新 / A 动画 / P 性能模式
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     var tag = (ev.target && ev.target.tagName) || "";
@@ -2232,15 +2344,17 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     } else if (ev.key === "r" || ev.key === "R") {
       poll();
     } else if (ev.key === "a" || ev.key === "A") {
-      if (!reducedMotion) setRainEnabled(!rainEnabled);
+      if (!reducedMotion && !perfMode) setRainEnabled(!rainEnabled);
+    } else if (ev.key === "p" || ev.key === "P") {
+      setPerfMode(!perfMode);
     }
   });
 
-  if (!reducedMotion && rainEnabled) {
+  if (!reducedMotion && rainEnabled && !perfMode) {
     resizeRain();
     startRainLoop();
   } else if (canvas) {
-    if (reducedMotion) canvas.style.display = "none";
+    if (reducedMotion || perfMode) canvas.style.display = "none";
     else canvas.style.opacity = "0";
   }
   tickClock();
