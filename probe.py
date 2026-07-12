@@ -883,8 +883,19 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   background: rgba(0,0,0,0.25);
   padding: 7px 8px; border-radius: 3px;
 }
-.kv .item .k { color: var(--dim); font-size: 10px; margin-bottom: 2px; }
-.kv .item .v { color: var(--text); word-break: break-all; font-size: 12px; }
+/* 仪表盘默认：标签在上、值在下 */
+.kv .item .k {
+  display: block;
+  color: var(--dim);
+  font-size: 10px;
+  margin-bottom: 2px;
+}
+.kv .item .v {
+  display: block;
+  color: var(--text);
+  word-break: break-all;
+  font-size: 12px;
+}
 .meter { margin-top: 10px; }
 .meter .row {
   display: grid; grid-template-columns: 72px 1fr 52px;
@@ -1088,6 +1099,7 @@ body[data-theme="tower"] .kv .item {
   padding: 8px 10px;
 }
 body[data-theme="tower"] .kv .item .k {
+  display: inline-block;
   margin-bottom: 0;
   flex: 0 0 auto;
   min-width: 5.2em;
@@ -1096,6 +1108,7 @@ body[data-theme="tower"] .kv .item .k {
   white-space: nowrap;
 }
 body[data-theme="tower"] .kv .item .v {
+  display: inline-block;
   flex: 1 1 auto;
   text-align: right;
   font-size: 12px;
