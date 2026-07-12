@@ -32,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -743,7 +743,15 @@ class ProbeHandler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "internal_error", "version": VERSION},
                     )
             elif path == "/health":
-                self._send_json(200, {"status": "ok"})
+                # 仅必要状态 + 版本，便于远程部署验收
+                self._send_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "version": VERSION,
+                        "uptime_seconds": int(time.time() - _start_time),
+                    },
+                )
             else:
                 self._send_json(404, {"ok": False, "error": "not_found"})
         except Exception:
@@ -772,6 +780,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
 <title>VPS Probe · 矩阵终端</title>
+<script>
+/* 尽早应用主题，避免首屏布局闪烁 */
+(function () {
+  try {
+    var t = localStorage.getItem("vps-probe-theme");
+    if (t === "tower" || t === "dashboard") {
+      document.documentElement.setAttribute("data-theme", t);
+    }
+  } catch (e) {}
+})();
+</script>
 <style>
 :root {
   --bg: #020604;
@@ -1031,7 +1050,7 @@ footer.bar .sep {
 .header-actions {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.theme-btn {
+.theme-btn, .icon-btn {
   appearance: none; cursor: pointer;
   font-family: var(--font); font-size: 11px;
   color: var(--ok);
@@ -1041,16 +1060,30 @@ footer.bar .sep {
   padding: 4px 12px;
   box-shadow: 0 0 8px rgba(0,255,106,0.15);
   letter-spacing: 0.06em;
-  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
 }
-.theme-btn:hover {
+.icon-btn {
+  min-width: 32px;
+  padding: 4px 10px;
+  line-height: 1;
+}
+.theme-btn:hover, .icon-btn:hover {
   background: rgba(0, 50, 20, 0.85);
   border-color: var(--ok);
   box-shadow: 0 0 12px rgba(0,255,136,0.35);
 }
-.theme-btn:focus-visible {
+.theme-btn:focus-visible, .icon-btn:focus-visible {
   outline: 1px solid var(--ok);
   outline-offset: 2px;
+}
+.icon-btn.busy { opacity: 0.55; pointer-events: none; }
+.ver-chip {
+  font-size: 10px;
+  color: var(--dim);
+  border: 1px solid rgba(0,255,106,0.25);
+  border-radius: 999px;
+  padding: 2px 8px;
+  letter-spacing: 0.04em;
 }
 
 /* ---- 竖向居中滚动主题 ----
@@ -1145,16 +1178,25 @@ body[data-theme="tower"] #rain {
 </style>
 </head>
 <body data-theme="dashboard">
+<script>
+(function () {
+  try {
+    var t = document.documentElement.getAttribute("data-theme");
+    if (t === "tower" || t === "dashboard") document.body.setAttribute("data-theme", t);
+  } catch (e) {}
+})();
+</script>
 <canvas id="rain" aria-hidden="true"></canvas>
 <div class="scanlines" aria-hidden="true"></div>
 <div class="wrap">
   <header class="app">
     <div>
-      <h1>◈ VPS PROBE // MATRIX</h1>
+      <h1>◈ VPS PROBE // MATRIX <span class="ver-chip" id="hdrVer">v—</span></h1>
       <div class="sub">只读系统探针 · 无命令执行 · 零配置</div>
     </div>
     <div class="header-actions">
-      <button type="button" id="themeBtn" class="theme-btn" title="切换布局主题" aria-label="切换布局主题">竖向主题</button>
+      <button type="button" id="refreshBtn" class="icon-btn" title="立即刷新数据 (R)" aria-label="立即刷新数据">↻</button>
+      <button type="button" id="themeBtn" class="theme-btn" title="切换布局主题 (T)" aria-label="切换布局主题">竖向主题</button>
       <div id="onlineBadge" class="badge"><span class="dot"></span><span id="onlineText">连接中…</span></div>
     </div>
   </header>
@@ -1243,6 +1285,7 @@ body[data-theme="tower"] #rain {
   function applyTheme(theme) {
     if (theme !== "tower" && theme !== "dashboard") theme = "dashboard";
     document.body.setAttribute("data-theme", theme);
+    try { document.documentElement.setAttribute("data-theme", theme); } catch (e) {}
     try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
     var btn = $("themeBtn");
     if (btn) {
@@ -1447,6 +1490,10 @@ body[data-theme="tower"] #rain {
     serviceUptimeBase = data.uptime_seconds || 0;
     serviceUptimeAt = Date.now();
     $("fVer").textContent = data.version || "—";
+    if ($("hdrVer")) $("hdrVer").textContent = "v" + (data.version || "—");
+    if (data.system && data.system.hostname) {
+      document.title = "VPS Probe · " + data.system.hostname;
+    }
     $("fCollect").textContent = data.collect_ms != null ? Number(data.collect_ms).toFixed(1) : "—";
     $("fReq").textContent = reqMs != null ? reqMs.toFixed(1) : "—";
     $("fAge").textContent = data.metrics_age_seconds != null ? Number(data.metrics_age_seconds).toFixed(1) : "—";
@@ -1575,11 +1622,23 @@ body[data-theme="tower"] #rain {
       toggleTheme();
     });
   }
-  // 快捷键 T：切换主题（输入框场景本页无）
+  var refreshBtn = $("refreshBtn");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", function () {
+      refreshBtn.classList.add("busy");
+      poll();
+      setTimeout(function () { refreshBtn.classList.remove("busy"); }, 400);
+    });
+  }
+  // 快捷键：T 主题 / R 刷新（本页无输入框）
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    var tag = (ev.target && ev.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (ev.key === "t" || ev.key === "T") {
       toggleTheme();
+    } else if (ev.key === "r" || ev.key === "R") {
+      poll();
     }
   });
 
@@ -1627,7 +1686,7 @@ def main() -> None:
     except Exception:
         pass
 
-    print(f"VPS Probe v{VERSION}")
+    print(f"VPS Probe v{VERSION} pid={os.getpid()}")
     print(f"监听 http://{HOST}:{PORT}/")
     print(f"健康检查 http://{HOST}:{PORT}/health")
     print("按 Ctrl+C 停止")
