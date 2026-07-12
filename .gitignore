@@ -20,3 +20,9 @@ build/
 .omc/
 .omx/
 docs/superpowers/
+# 本地运维脚本，不进入仓库
+bohrium-sync.sh
+_remote_build.sh
+_remote_verify.sh
+_footer_inspect*.js
+images/

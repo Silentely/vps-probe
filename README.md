@@ -256,7 +256,6 @@ vps-probe/
 ├── probe.py            # 后端 + 内嵌 HTML / CSS / JS（主题切换在此）
 ├── requirements.txt    # 仅 psutil
 ├── Dockerfile          # 轻量镜像、非 root、HEALTHCHECK
-├── bohrium-sync.sh     # 可选：同步到 Bohrium 并在 50000 验收
 ├── LICENSE             # MIT
 ├── .dockerignore
 ├── .gitignore
