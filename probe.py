@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 SYS_HISTORY_SIZE = 20           # 系统指标历史样本数（CPU/内存/磁盘趋势图）
 HOST = "0.0.0.0"
@@ -1037,11 +1037,11 @@ body {
     0deg,
     transparent,
     transparent 2px,
-    rgba(0, 0, 0, 0.06) 2px,
-    rgba(0, 0, 0, 0.06) 4px
+    rgba(0, 0, 0, 0.05) 2px,
+    rgba(0, 0, 0, 0.05) 4px
   );
   mix-blend-mode: multiply;
-  opacity: 0.55;
+  opacity: 0.5;
   will-change: auto;
   contain: strict;
 }
@@ -1101,7 +1101,10 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   padding: 12px;
   position: relative;
   overflow: hidden;
-  /* 去掉 backdrop-filter 毛玻璃，降低合成层开销 */
+  transition: border-color 0.3s;
+}
+.panel:hover {
+  border-color: rgba(0,255,106,0.6);
 }
 .panel::before {
   content: "";
@@ -1115,6 +1118,7 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   margin-bottom: 10px; text-transform: uppercase;
   border-bottom: 1px solid rgba(0,255,106,0.2); padding-bottom: 6px;
   display: flex; align-items: center; gap: 8px;
+  text-shadow: 0 0 6px rgba(0,255,136,0.3);
 }
 .panel h2::before {
   content: "▸";
@@ -1183,6 +1187,10 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   text-align: left; padding: 6px 4px;
   border-bottom: 1px solid rgba(0,255,106,0.12);
   white-space: nowrap;
+  transition: background 0.15s;
+}
+.ping-table tbody tr:hover {
+  background: rgba(0,255,106,0.04);
 }
 .ping-table th { color: var(--dim); font-weight: normal; font-size: 10px; }
 .ping-table td.host { color: var(--dim); max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
@@ -1820,9 +1828,14 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
   }
 
   /* 系统指标趋势图：固定 0-100% 范围，颜色跟随状态 */
+  var sysSparkCache = {};
+  var sysSparkCacheKeys = [];
+  var SYS_SPARK_CACHE_MAX = 10;
   function sysSparklineSvg(arr, status) {
     arr = (arr || []).map(Number).filter(function (x) { return !isNaN(x) && x >= 0; });
     if (arr.length < 2) return "";
+    var cacheKey = arr.join(",") + "|" + status;
+    if (sysSparkCache[cacheKey]) return sysSparkCache[cacheKey];
     var w = 56, h = 16, pad = 1;
     var pts = [];
     for (var i = 0; i < arr.length; i++) {
@@ -1833,7 +1846,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     var color = status === "danger" ? "#ff3355" : (status === "warn" ? "#ffcc00" : "#00ff88");
     var fillId = "sy" + Math.random().toString(36).slice(2, 8);
     var areaPts = pts.join(" ") + " " + (w - pad).toFixed(1) + "," + (h - pad).toFixed(1) + " " + pad.toFixed(1) + "," + (h - pad).toFixed(1);
-    return '<svg viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
+    var result = '<svg viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
       '" aria-hidden="true">' +
       '<defs><linearGradient id="' + fillId + '" x1="0" y1="0" x2="0" y2="1">' +
       '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.3"/>' +
@@ -1843,6 +1856,12 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       '<polyline fill="none" stroke="' + color +
       '" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round" points="' +
       pts.join(" ") + '"/></svg>';
+    sysSparkCache[cacheKey] = result;
+    sysSparkCacheKeys.push(cacheKey);
+    if (sysSparkCacheKeys.length > SYS_SPARK_CACHE_MAX) {
+      delete sysSparkCache[sysSparkCacheKeys.shift()];
+    }
+    return result;
   }
 
   function compactTime(s) {
