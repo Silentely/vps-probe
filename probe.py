@@ -32,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.2.0"
+VERSION = "1.2.2"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -816,16 +816,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
   --font: "SF Mono", "Cascadia Code", "Consolas", "Menlo", ui-monospace, monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body {
+html {
   height: 100%;
+  /* 避免 overflow-x:hidden 裁切 position:fixed 底栏溢出内容 */
+  overflow-x: clip;
+  overflow-y: auto;
+}
+body {
+  min-height: 100%;
   width: 100%;
+  margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
   line-height: 1.45;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow-x: clip;
+  overflow-y: visible;
 }
 #rain {
   position: fixed; inset: 0; z-index: 0;
@@ -847,11 +854,12 @@ html, body {
   position: relative; z-index: 2;
   min-height: 100%;
   display: flex; flex-direction: column;
-  /* 预留多行底栏 + 安全区，避免被固定页脚遮挡 */
-  padding: 12px 14px calc(108px + env(safe-area-inset-bottom, 0px));
+  /* 预留底栏完整高度，避免内容被挡住 */
+  padding: 12px 14px calc(96px + env(safe-area-inset-bottom, 0px));
   max-width: 1400px; margin: 0 auto;
   width: 100%;
   box-sizing: border-box;
+  overflow-x: clip;
 }
 header.app {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
@@ -944,18 +952,19 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 .meter .label { color: var(--dim); font-size: 11px; }
 .meter .pct { text-align: right; font-variant-numeric: tabular-nums; }
-.bar {
+/* 进度条专用，类名 meter-bar，避免与底栏冲突 */
+.meter-bar {
   height: 10px; background: rgba(0,40,15,0.8);
   border: 1px solid rgba(0,255,106,0.25); border-radius: 2px; overflow: hidden;
 }
-.bar > i {
+.meter-bar > i {
   display: block; height: 100%; width: 0%;
   background: linear-gradient(90deg, #00aa55, var(--ok));
   box-shadow: 0 0 8px rgba(0,255,136,0.5);
   transition: width 0.45s ease, background 0.3s;
 }
-.bar.warn > i { background: linear-gradient(90deg, #aa8800, var(--warn)); box-shadow: 0 0 8px rgba(255,204,0,0.5); }
-.bar.danger > i { background: linear-gradient(90deg, #aa0022, var(--danger)); box-shadow: 0 0 8px rgba(255,51,85,0.5); }
+.meter-bar.warn > i { background: linear-gradient(90deg, #aa8800, var(--warn)); box-shadow: 0 0 8px rgba(255,204,0,0.5); }
+.meter-bar.danger > i { background: linear-gradient(90deg, #aa0022, var(--danger)); box-shadow: 0 0 8px rgba(255,51,85,0.5); }
 .pct.ok, .st.ok { color: var(--ok); }
 .pct.warn, .st.warn { color: var(--warn); }
 .pct.danger, .st.danger { color: var(--danger); }
@@ -997,46 +1006,66 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* 底栏：全宽多行芯片布局，禁止横向裁切导致「只看到一半」 */
-footer.bar {
+/* 底栏 class 禁止使用 .bar —— 会与进度条 .bar{height:10px} 冲突导致底栏被压扁裁切 */
+footer.status-bar {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
-  width: 100vw;
-  max-width: 100vw;
+  width: auto;
   box-sizing: border-box;
-  z-index: 50;
-  background: rgba(0, 8, 4, 0.97);
-  border-top: 1px solid rgba(0,255,106,0.4);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  z-index: 100;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  background: rgba(0, 8, 4, 0.98);
+  border-top: 1px solid rgba(0, 255, 106, 0.45);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow: visible;
+  font-size: 11px;
+  color: var(--dim);
+}
+footer.status-bar .footer-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
   gap: 6px 8px;
-  font-size: 11px;
-  color: var(--dim);
-  line-height: 1.35;
-  overflow: visible;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  min-height: 44px;
 }
-footer.bar .f-item {
+footer.status-bar .f-item {
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   white-space: nowrap;
-  background: rgba(0, 24, 10, 0.55);
-  border: 1px solid rgba(0,255,106,0.18);
+  height: 26px;
+  line-height: 1;
+  background: rgba(0, 28, 12, 0.72);
+  border: 1px solid rgba(0, 255, 106, 0.22);
   border-radius: 4px;
-  padding: 3px 8px;
+  padding: 0 9px;
+  box-sizing: border-box;
 }
-footer.bar strong {
+footer.status-bar strong {
   color: var(--text);
   font-weight: normal;
+  margin-left: 2px;
 }
 @media (max-width: 720px) {
-  footer.bar { font-size: 10px; gap: 5px 6px; padding: 8px; }
-  footer.bar .f-item { padding: 3px 6px; }
+  footer.status-bar { font-size: 10px; }
+  footer.status-bar .footer-inner {
+    gap: 5px 6px;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  footer.status-bar .f-item { height: 24px; padding: 0 7px; }
   .wrap { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
 }
 .err-banner {
@@ -1183,7 +1212,7 @@ body[data-theme="tower"] .scroll-x {
 body[data-theme="tower"] .ping-table {
   font-size: 10px;
 }
-body[data-theme="tower"] footer.bar {
+body[data-theme="tower"] footer.status-bar .footer-inner {
   justify-content: flex-start;
 }
 @media (max-width: 640px) {
@@ -1248,17 +1277,19 @@ body[data-theme="tower"] footer.bar {
   </div>
 </div>
 
-<footer class="bar" id="statusBar">
-  <span class="f-item">日期 <strong id="fDate">—</strong></span>
-  <span class="f-item">时间 <strong id="fTime">—</strong></span>
-  <span class="f-item">请求 <strong id="fReq">—</strong> ms</span>
-  <span class="f-item">采集 <strong id="fCollect">—</strong> ms</span>
-  <span class="f-item">数据龄 <strong id="fAge">—</strong> s</span>
-  <span class="f-item">Ping龄 <strong id="fPingAge">—</strong> s</span>
-  <span class="f-item">更新 <strong id="fUpdated">—</strong></span>
-  <span class="f-item">状态 <strong id="fStatus">—</strong></span>
-  <span class="f-item">运行 <strong id="fUptime">—</strong></span>
-  <span class="f-item">v<strong id="fVer">—</strong></span>
+<footer class="status-bar" id="statusBar">
+  <div class="footer-inner">
+    <span class="f-item">日期 <strong id="fDate">—</strong></span>
+    <span class="f-item">时间 <strong id="fTime">—</strong></span>
+    <span class="f-item">请求 <strong id="fReq">—</strong> ms</span>
+    <span class="f-item">采集 <strong id="fCollect">—</strong> ms</span>
+    <span class="f-item">数据龄 <strong id="fAge">—</strong> s</span>
+    <span class="f-item">Ping龄 <strong id="fPingAge">—</strong> s</span>
+    <span class="f-item">更新 <strong id="fUpdated">—</strong></span>
+    <span class="f-item">状态 <strong id="fStatus">—</strong></span>
+    <span class="f-item">运行 <strong id="fUptime">—</strong></span>
+    <span class="f-item">v<strong id="fVer">—</strong></span>
+  </div>
 </footer>
 
 <script>
@@ -1367,7 +1398,7 @@ body[data-theme="tower"] footer.bar {
     var st = status || "ok";
     var p = Math.max(0, Math.min(100, Number(pct) || 0));
     return '<div class="row"><span class="label">' + esc(label) + '</span>' +
-      '<div class="bar ' + esc(st) + '"><i style="width:' + p.toFixed(1) + '%"></i></div>' +
+      '<div class="meter-bar ' + esc(st) + '"><i style="width:' + p.toFixed(1) + '%"></i></div>' +
       '<span class="pct ' + esc(st) + '">' + p.toFixed(1) + '%</span></div>';
   }
 
