@@ -32,7 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.2.4"
+VERSION = "1.3.0"
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -814,9 +814,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   --warn: #ffcc00;
   --danger: #ff3355;
   --offline: #666;
-  --glow: 0 0 12px rgba(0, 255, 106, 0.35);
+  --glow: 0 0 6px rgba(0, 255, 106, 0.22);
   --font: "SF Mono", "Cascadia Code", "Consolas", "Menlo", ui-monospace, monospace;
-  --rain-opacity: 0.40;
+  /* 雨层可见但不抢 GPU；配合低密度绘制 */
+  --rain-opacity: 0.38;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html {
@@ -874,8 +875,6 @@ header.app {
   box-shadow: var(--glow);
   padding: 10px 14px;
   border-radius: 4px;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 header.app h1 {
   font-size: 15px; letter-spacing: 0.12em; color: var(--ok);
@@ -889,13 +888,11 @@ header.app .sub { color: var(--dim); font-size: 11px; }
 }
 .badge .dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
-  box-shadow: 0 0 6px var(--ok); animation: pulse 1.6s infinite;
+  box-shadow: 0 0 4px var(--ok);
+  /* 脉冲动画改为静态，减少持续重绘 */
 }
 .badge.offline { border-color: var(--danger); color: var(--danger); }
-.badge.offline .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
-@keyframes pulse {
-  0%,100% { opacity: 1; } 50% { opacity: 0.35; }
-}
+.badge.offline .dot { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
 .grid {
   display: grid;
   grid-template-columns: 1.2fr 1fr;
@@ -914,18 +911,14 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   padding: 12px;
   position: relative;
   overflow: hidden;
-  /* 轻微毛玻璃：半透出背后数字雨，同时保持文字可读 */
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  /* 去掉 backdrop-filter 毛玻璃，降低合成层开销 */
 }
 .panel::before {
   content: "";
-  position: absolute; left: 0; right: 0; top: 0; height: 2px;
-  background: linear-gradient(90deg, transparent, var(--ok), transparent);
-  opacity: 0.7; animation: scan 3.5s linear infinite;
-}
-@keyframes scan {
-  0% { transform: translateX(-100%); } 100% { transform: translateX(100%); }
+  position: absolute; left: 0; right: 0; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0,255,106,0.55), transparent);
+  opacity: 0.65;
+  /* 去掉无限位移动画，减轻主线程/合成压力 */
 }
 .panel h2 {
   font-size: 12px; letter-spacing: 0.16em; color: var(--ok);
@@ -971,7 +964,7 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   display: block; height: 100%; width: 0%;
   background: linear-gradient(90deg, #00aa55, var(--ok));
   box-shadow: 0 0 8px rgba(0,255,136,0.5);
-  transition: width 0.45s ease, background 0.3s;
+  transition: width 0.25s linear;
 }
 .meter-bar.warn > i { background: linear-gradient(90deg, #aa8800, var(--warn)); box-shadow: 0 0 8px rgba(255,204,0,0.5); }
 .meter-bar.danger > i { background: linear-gradient(90deg, #aa0022, var(--danger)); box-shadow: 0 0 8px rgba(255,51,85,0.5); }
@@ -1031,11 +1024,9 @@ footer.status-bar {
   height: auto;
   min-height: 0;
   max-height: none;
-  background: rgba(0, 8, 4, 0.98);
+  background: rgba(0, 8, 4, 0.96);
   border-top: 1px solid rgba(0, 255, 106, 0.45);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.35);
   overflow: visible;
   font-size: 11px;
   color: var(--dim);
@@ -1131,14 +1122,14 @@ footer.status-bar strong {
 body[data-theme="tower"] {
   overflow-x: hidden;
   overflow-y: auto;
-  --rain-opacity: 0.58;
-  --panel: rgba(0, 12, 5, 0.48);
+  --rain-opacity: 0.48;
+  --panel: rgba(0, 12, 5, 0.55);
 }
 body[data-theme="tower"] #rain {
   z-index: 0;
 }
 body[data-theme="tower"] .scanlines {
-  opacity: 0.4;
+  opacity: 0.35;
 }
 body[data-theme="tower"] .wrap {
   max-width: 520px;
@@ -1155,9 +1146,7 @@ body[data-theme="tower"] header.app {
   align-items: center;
   text-align: center;
   gap: 10px;
-  background: rgba(0, 14, 6, 0.55);
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
+  background: rgba(0, 14, 6, 0.58);
 }
 body[data-theme="tower"] header.app h1 {
   font-size: 14px;
@@ -1174,9 +1163,7 @@ body[data-theme="tower"] .grid {
 }
 body[data-theme="tower"] .panel {
   width: 100%;
-  background: rgba(0, 14, 6, 0.50);
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
+  background: rgba(0, 14, 6, 0.56);
 }
 body[data-theme="tower"] .terminal {
   grid-column: auto;
@@ -1234,7 +1221,7 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
     width: min(100%, calc(100% - 16px));
   }
   body[data-theme="tower"] {
-    --rain-opacity: 0.42;
+    --rain-opacity: 0.36;
   }
 }
 </style>
@@ -1316,13 +1303,16 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
   var lastEventsSig = "";
   var lastSysSig = "";
   var lastPingSig = "";
-  var pollMs = 2000;
+  var pollMs = 3000;          /* 降轮询频率，减轻主线程 */
+  var pollMsHidden = 8000;
   var timer = null;
   var clockTimer = null;
   var serviceUptimeBase = 0;
   var serviceUptimeAt = 0;
   var THEME_KEY = "vps-probe-theme";
   var reducedMotion = false;
+  var rainRaf = 0;
+  var resizeTimer = 0;
   try {
     reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   } catch (e) {}
@@ -1595,155 +1585,157 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
       });
   }
 
-  /* ---- Matrix rain ---- */
+  /* ---- Matrix rain（性能优先：低 DPR、限数量、低帧率、少随机） ---- */
   var canvas = $("rain");
-  var ctx = canvas.getContext("2d");
+  var ctx = canvas ? canvas.getContext("2d", { alpha: false }) : null;
   var drops = [];
   var cols = 0;
-  var fontSize = 14;
-  var chars = "01アイウエオカキクケコｱｲｳｴｵﾊﾞｼﾞﾄﾞ01ΨΦλ∑¥$#@";
+  var fontSize = 16;
+  var chars = "01ﾊﾞｼﾞﾄﾞ01";
   var rainActive = true;
   var lastFrame = 0;
-  var frameGap = 48;
-
-  function resizeRain() {
-    if (reducedMotion || !canvas || !ctx) return;
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(window.innerWidth * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
-    canvas.style.width = window.innerWidth + "px";
-    canvas.style.height = window.innerHeight + "px";
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var mobile = window.innerWidth < 768;
-    var tower = isTowerTheme();
-    fontSize = mobile ? 15 : 14;
-    frameGap = mobile ? 64 : (tower ? 42 : 48);
-    cols = Math.floor(window.innerWidth / fontSize);
-    // 竖向主题提高密度，两侧 gutter 更有数据流感
-    var density = tower ? (mobile ? 0.85 : 1.25) : (mobile ? 0.55 : 1.0);
-    var n = Math.max(1, Math.floor(cols * density));
-    drops = [];
-    var bounds = tower ? towerCenterBounds() : null;
-    for (var i = 0; i < n; i++) {
-      var x;
-      if (tower && bounds && (bounds.left > 20 || bounds.right < window.innerWidth - 20)) {
-        if (Math.random() < 0.5 && bounds.left > 20) {
-          x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
-        } else {
-          var rc = Math.floor(Math.max(1, (window.innerWidth - bounds.right) / fontSize));
-          x = bounds.right + Math.floor(Math.random() * rc) * fontSize;
-        }
-      } else {
-        x = Math.floor(Math.random() * cols) * fontSize;
-      }
-      drops.push({
-        x: x,
-        y: Math.random() * -100,
-        speed: 0.6 + Math.random() * 1.5
-      });
-    }
-  }
+  var frameGap = 66; /* ~15fps */
+  var cachedBounds = null;
+  var rainW = 0;
+  var rainH = 0;
 
   function isTowerTheme() {
     return document.body.getAttribute("data-theme") === "tower";
   }
 
   function towerCenterBounds() {
-    // 与 CSS max-width:520px 对齐，两侧留给数字雨
     var cw = Math.min(520, Math.max(280, window.innerWidth - 28));
     var left = Math.max(0, (window.innerWidth - cw) / 2);
     return { left: left, right: left + cw, width: cw };
   }
 
-  function drawRain(ts) {
-    if (reducedMotion) return;
-    if (!rainActive) {
-      requestAnimationFrame(drawRain);
-      return;
+  function pickDropX(tower, bounds) {
+    if (tower && bounds && (bounds.left > 24 || bounds.right < rainW - 24)) {
+      if (Math.random() < 0.55 && bounds.left > 24) {
+        return Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
+      }
+      var rc = Math.floor(Math.max(1, (rainW - bounds.right) / fontSize));
+      return bounds.right + Math.floor(Math.random() * rc) * fontSize;
     }
+    return Math.floor(Math.random() * Math.max(1, cols)) * fontSize;
+  }
+
+  function resizeRain() {
+    if (reducedMotion || !canvas || !ctx) return;
+    // 固定 dpr=1，Retina 像素量约减半～3/4，显著降卡顿
+    var dpr = 1;
+    rainW = window.innerWidth || 1;
+    rainH = window.innerHeight || 1;
+    canvas.width = rainW;
+    canvas.height = rainH;
+    canvas.style.width = rainW + "px";
+    canvas.style.height = rainH + "px";
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    var mobile = rainW < 768;
+    var tower = isTowerTheme();
+    fontSize = mobile ? 18 : 16;
+    // 更低帧率：移动端 ~10fps，桌面 ~12–15fps
+    frameGap = mobile ? 100 : (tower ? 80 : 66);
+    cols = Math.floor(rainW / fontSize) || 1;
+    cachedBounds = tower ? towerCenterBounds() : null;
+    // 硬顶数量，避免宽屏雨滴爆炸
+    var n;
+    if (tower) {
+      n = mobile ? 28 : 48;
+    } else {
+      n = mobile ? 22 : 40;
+    }
+    n = Math.min(n, Math.max(12, Math.floor(cols * (tower ? 0.35 : 0.28))));
+    drops = [];
+    for (var i = 0; i < n; i++) {
+      drops.push({
+        x: pickDropX(tower, cachedBounds),
+        y: Math.random() * -80,
+        speed: 0.9 + Math.random() * 1.2,
+        ch: chars.charAt(i % chars.length),
+        alpha: 0.45 + (i % 5) * 0.08
+      });
+    }
+  }
+
+  function stopRainLoop() {
+    if (rainRaf) {
+      cancelAnimationFrame(rainRaf);
+      rainRaf = 0;
+    }
+  }
+
+  function startRainLoop() {
+    if (reducedMotion || !ctx || rainRaf) return;
+    rainRaf = requestAnimationFrame(drawRain);
+  }
+
+  function drawRain(ts) {
+    rainRaf = 0;
+    if (reducedMotion || !ctx) return;
+    if (!rainActive) return; /* 页不可见时彻底停环，不空转 rAF */
     if (ts - lastFrame < frameGap) {
-      requestAnimationFrame(drawRain);
+      rainRaf = requestAnimationFrame(drawRain);
       return;
     }
     lastFrame = ts;
-    var w = window.innerWidth;
-    var h = window.innerHeight;
+    var w = rainW;
+    var h = rainH;
     var tower = isTowerTheme();
-    var bounds = tower ? towerCenterBounds() : null;
+    var bounds = tower ? cachedBounds : null;
 
-    // 残影更淡，保留更多雨迹可见
-    ctx.fillStyle = "rgba(2, 6, 4, 0.10)";
+    // 残影一笔带过
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(2, 6, 4, 0.18)";
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = "#00ff6a";
     ctx.font = fontSize + "px monospace";
 
-    for (var i = 0; i < drops.length; i++) {
-      var d = drops[i];
-      // 竖向主题：优先两侧 gutter，中心也保留少量雨丝透出面板
-      if (tower && bounds) {
-        var inCenter = d.x >= bounds.left - 4 && d.x <= bounds.right + 4;
-        if (inCenter && Math.random() > 0.22) {
-          if (Math.random() < 0.5 && bounds.left > fontSize * 2) {
-            d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
-          } else if (bounds.right < w - fontSize * 2) {
-            var rightCols = Math.floor((w - bounds.right) / fontSize);
-            d.x = bounds.right + Math.floor(Math.random() * Math.max(1, rightCols)) * fontSize;
-          } else {
-            d.x = Math.floor(Math.random() * cols) * fontSize;
-          }
+    var i, d, yy;
+    for (i = 0; i < drops.length; i++) {
+      d = drops[i];
+      ctx.globalAlpha = d.alpha;
+      ctx.fillText(d.ch, d.x, d.y * fontSize);
+      d.y += d.speed;
+      yy = d.y * fontSize;
+      if (yy > h) {
+        d.y = Math.random() * -12;
+        d.x = pickDropX(tower, bounds);
+        // 偶发换字符，避免每帧 random
+        if ((i + (ts | 0)) % 7 === 0) {
+          d.ch = chars.charAt((i + (ts | 0)) % chars.length);
         }
       }
-      var ch = chars.charAt(Math.floor(Math.random() * chars.length));
-      var sideBoost = 0;
-      if (tower && bounds) {
-        sideBoost = (d.x < bounds.left || d.x > bounds.right) ? 0.28 : -0.08;
-      }
-      // 提高字符亮度区间，使数据流更清晰
-      ctx.globalAlpha = Math.max(0.22, Math.min(0.95, 0.48 + Math.random() * 0.42 + sideBoost));
-      ctx.fillText(ch, d.x, d.y * fontSize);
-      d.y += d.speed * (tower ? 1.2 : 1.05);
-      if (d.y * fontSize > h && Math.random() > 0.97) {
-        d.y = Math.random() * -20;
-        if (tower && bounds && (bounds.left > 24 || bounds.right < w - 24)) {
-          if (Math.random() < 0.62 && bounds.left > 24) {
-            d.x = Math.floor(Math.random() * Math.max(1, bounds.left / fontSize)) * fontSize;
-          } else {
-            var rc = Math.floor(Math.max(1, (w - bounds.right) / fontSize));
-            d.x = bounds.right + Math.floor(Math.random() * rc) * fontSize;
-          }
-        } else {
-          d.x = Math.floor(Math.random() * cols) * fontSize;
-        }
-      }
-    }
-
-    // 竖向主题：仅两侧柔和过渡，中心不再大面积压暗（避免看不见雨）
-    if (tower && bounds) {
-      ctx.globalAlpha = 1;
-      var g = ctx.createLinearGradient(bounds.left - 36, 0, bounds.left + 12, 0);
-      g.addColorStop(0, "rgba(2,6,4,0)");
-      g.addColorStop(1, "rgba(2,6,4,0.18)");
-      ctx.fillStyle = g;
-      ctx.fillRect(bounds.left - 36, 0, 48, h);
-      var g2 = ctx.createLinearGradient(bounds.right - 12, 0, bounds.right + 36, 0);
-      g2.addColorStop(0, "rgba(2,6,4,0.18)");
-      g2.addColorStop(1, "rgba(2,6,4,0)");
-      ctx.fillStyle = g2;
-      ctx.fillRect(bounds.right - 12, 0, 48, h);
     }
     ctx.globalAlpha = 1;
-    requestAnimationFrame(drawRain);
+    rainRaf = requestAnimationFrame(drawRain);
+  }
+
+  function scheduleResizeRain() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      resizeTimer = 0;
+      resizeRain();
+    }, 180);
+  }
+
+  function resetPollTimer() {
+    if (timer) clearInterval(timer);
+    var ms = document.visibilityState === "visible" ? pollMs : pollMsHidden;
+    timer = setInterval(poll, ms);
   }
 
   document.addEventListener("visibilitychange", function () {
     rainActive = document.visibilityState === "visible";
-    if (document.visibilityState === "visible") {
+    if (rainActive) {
+      startRainLoop();
       poll();
+    } else {
+      stopRainLoop();
     }
+    resetPollTimer();
   });
-  window.addEventListener("resize", function () {
-    resizeRain();
-  });
+  window.addEventListener("resize", scheduleResizeRain);
 
   // 主题：读取本地偏好并绑定切换（纯前端，无配置文件）
   applyTheme(getTheme());
@@ -1775,14 +1767,14 @@ body[data-theme="tower"] footer.status-bar .footer-inner {
 
   if (!reducedMotion) {
     resizeRain();
-    requestAnimationFrame(drawRain);
+    startRainLoop();
   } else if (canvas) {
     canvas.style.display = "none";
   }
   tickClock();
   clockTimer = setInterval(tickClock, 1000);
   poll();
-  timer = setInterval(poll, pollMs);
+  resetPollTimer();
 })();
 </script>
 </body>
