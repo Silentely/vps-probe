@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 SYS_HISTORY_SIZE = 20           # 系统指标历史样本数（CPU/内存/磁盘趋势图）
 HOST = "0.0.0.0"
@@ -42,10 +42,11 @@ PORT = 8080
 METRICS_INTERVAL = 2.0          # 系统指标采集间隔（秒）
 PING_INTERVAL = 12.0            # Ping 调度间隔（秒）；目标增多后略放宽
 PING_TIMEOUT = 2                # 单次 ICMP 超时（秒）
-TCP_TIMEOUT = 2.0               # TCP 443 回退探测超时（秒）
+TCP_TIMEOUT = 1.8               # TCP 回退探测超时（秒）
 PING_HISTORY_SIZE = 30          # 每目标保留的延迟样本数
 EVENT_MAX = 100                 # 事件最多保留条数
 EVENT_DEDUP_WINDOW = 60.0       # 相同异常限频窗口（秒）
+EVENT_MSG_MAX = 180             # 单条事件文案最大长度
 EVENT_LAST_MAX = 256            # 限频键上限，防止字典无限增长
 WARN_USAGE = 80.0               # 使用率警告阈值 %
 DANGER_USAGE = 90.0             # 使用率危险阈值 %
@@ -118,6 +119,9 @@ _cpu_primed = False
 _runtime_mode: Optional[str] = None  # host | container
 _html_body: Optional[bytes] = None
 _html_etag: Optional[str] = None
+_ping_bin_cache: Optional[bool] = None
+_ping_fail_streak: Dict[str, int] = {t["id"]: 0 for t in PING_TARGETS}
+_ping_pool: Optional[ThreadPoolExecutor] = None
 
 
 def _now_iso() -> str:
@@ -206,11 +210,14 @@ def add_event(level: str, message: str, dedup_key: Optional[str] = None) -> None
                     : len(_event_last) // 2
                 ]:
                     _event_last.pop(k, None)
+        msg = str(message or "")
+        if len(msg) > EVENT_MSG_MAX:
+            msg = msg[: EVENT_MSG_MAX - 1] + "…"
         _events.appendleft(
             {
                 "ts": _now_iso(),
                 "level": level,
-                "message": message,
+                "message": msg,
             }
         )
 
@@ -375,15 +382,23 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
     # Network totals + rates（排除 lo，更接近「外网向」体感）
     net_sent = net_recv = 0
     up_rate = down_rate = 0.0
+    top_nic = ""
     try:
         pernic = psutil.net_io_counters(pernic=True) or {}
+        top_bytes = -1
         if pernic:
             for name, io in pernic.items():
                 n = (name or "").lower()
                 if n == "lo" or n.startswith("lo:") or n.startswith("loop"):
                     continue
-                net_sent += int(io.bytes_sent)
-                net_recv += int(io.bytes_recv)
+                s = int(io.bytes_sent)
+                r = int(io.bytes_recv)
+                net_sent += s
+                net_recv += r
+                total = s + r
+                if total > top_bytes:
+                    top_bytes = total
+                    top_nic = name
         else:
             io = psutil.net_io_counters()
             if io is not None:
@@ -401,11 +416,25 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
     except Exception:
         pass
 
+    # 根分区 inode（若系统支持）
+    inode_total = inode_used = 0
+    inode_percent = 0.0
+    try:
+        stv = os.statvfs("/")
+        if stv.f_files > 0:
+            inode_total = int(stv.f_files)
+            free_inodes = int(stv.f_ffree)
+            inode_used = max(0, inode_total - free_inodes)
+            inode_percent = round(inode_used * 100.0 / inode_total, 1)
+    except (OSError, AttributeError):
+        pass
+
     collect_ms = (time.perf_counter() - t0) * 1000.0
 
     raw_host = socket.gethostname()
     runtime = detect_runtime()
     load_per_core = round(load1 / max(logical, 1), 2)
+    mem_avail_pct = round((mem_available * 100.0 / mem_total), 1) if mem_total else 0.0
     data = {
         "hostname": raw_host,
         "hostname_display": hostname_display(raw_host, runtime),
@@ -427,6 +456,7 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "memory_total": mem_total,
         "memory_used": mem_used,
         "memory_available": mem_available,
+        "memory_available_percent": mem_avail_pct,
         "memory_percent": round(mem_percent, 1),
         "memory_status": _status_from_pct(mem_percent),
         "swap_total": swap_total,
@@ -440,6 +470,9 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "disk_status": _status_from_pct(disk_percent),
         "disk_mount": "/",
         "disk_label": "磁盘 /（根分区）",
+        "disk_inode_total": inode_total,
+        "disk_inode_used": inode_used,
+        "disk_inode_percent": inode_percent,
         "boot_time": datetime.fromtimestamp(boot_ts).astimezone().isoformat(timespec="seconds"),
         "uptime_seconds": uptime_sec,
         "users": users,
@@ -448,6 +481,7 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "net_bytes_recv": net_recv,
         "net_up_rate": round(up_rate, 1),
         "net_down_rate": round(down_rate, 1),
+        "net_top_iface": top_nic or None,
         "net_exclude_loopback": True,
         "timezone": _tz_label(),
     }
@@ -497,7 +531,11 @@ def _emit_metric_alerts(data: Dict[str, Any]) -> None:
 # Ping
 # ---------------------------------------------------------------------------
 def _detect_ping() -> bool:
-    return shutil.which("ping") is not None
+    """缓存 which(ping) 结果，避免每轮探测反复扫 PATH。"""
+    global _ping_bin_cache
+    if _ping_bin_cache is None:
+        _ping_bin_cache = shutil.which("ping") is not None
+    return bool(_ping_bin_cache)
 
 
 def _ping_command(host: str) -> List[str]:
@@ -570,32 +608,35 @@ def ping_once(host: str) -> Tuple[bool, Optional[float], str]:
 def tcp_probe_ms(host: str, port: int = 443) -> Tuple[bool, Optional[float], str]:
     """固定端口 TCP 连接探测（不执行 shell），作为 ICMP 失败时的回退。"""
     t0 = time.perf_counter()
+    tag = f"tcp{port}"
     try:
         # 禁止把用户输入拼进命令；此处 host 仅来自内置列表
         with socket.create_connection((host, port), timeout=TCP_TIMEOUT):
             rtt = (time.perf_counter() - t0) * 1000.0
-            return True, round(rtt, 2), "tcp443"
+            return True, round(rtt, 2), tag
     except (socket.timeout, TimeoutError):
-        return False, None, "tcp_timeout"
+        return False, None, f"{tag}_timeout"
     except OSError:
-        return False, None, "tcp_unreachable"
+        return False, None, f"{tag}_unreachable"
 
 
 def probe_target(host: str) -> Tuple[bool, Optional[float], str]:
-    """先 ICMP，失败则 TCP/443 回退；无 ping 时直接 TCP。"""
+    """先 ICMP，失败则 TCP/443，再尝试 TCP/80；无 ping 时直接 TCP。"""
     has_ping = _detect_ping()
+    last_detail = "unreachable"
     if has_ping:
         ok, rtt, detail = ping_once(host)
         if ok:
             return ok, rtt, detail
-        ok2, rtt2, detail2 = tcp_probe_ms(host, 443)
+        last_detail = detail
+    for port in (443, 80):
+        ok2, rtt2, detail2 = tcp_probe_ms(host, port)
         if ok2:
             return True, rtt2, detail2
-        return False, None, detail
-    ok2, rtt2, detail2 = tcp_probe_ms(host, 443)
-    if ok2:
-        return True, rtt2, detail2
-    return False, None, "ping_not_found_tcp_fail"
+        last_detail = detail2
+    if not has_ping:
+        return False, None, "ping_not_found_tcp_fail"
+    return False, None, last_detail
 
 
 def _latency_status(avg: Optional[float], loss: float, online: bool) -> str:
@@ -628,17 +669,20 @@ def run_ping_round() -> None:
         ok, rtt, detail = probe_target(str(target["host"]))
         return str(target["id"]), ok, rtt, detail
 
+    global _ping_pool
     results: Dict[str, Tuple[bool, Optional[float], str]] = {}
     workers = max(4, min(16, len(PING_TARGETS)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_job, t): t["id"] for t in PING_TARGETS}
-        for fut in as_completed(futures):
-            try:
-                tid, ok, rtt, detail = fut.result()
-                results[tid] = (ok, rtt, detail)
-            except Exception:
-                tid = futures[fut]
-                results[tid] = (False, None, "error")
+    if _ping_pool is None:
+        _ping_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ping")
+    pool = _ping_pool
+    futures = {pool.submit(_job, t): t["id"] for t in PING_TARGETS}
+    for fut in as_completed(futures):
+        try:
+            tid, ok, rtt, detail = fut.result()
+            results[tid] = (ok, rtt, detail)
+        except Exception:
+            tid = futures[fut]
+            results[tid] = (False, None, "error")
 
     now_iso = _now_iso()
     with _state_lock:
@@ -666,6 +710,12 @@ def run_ping_round() -> None:
             online = bool(ok)
             status = _latency_status(avg_ms, loss, online)
 
+            if online:
+                _ping_fail_streak[tid] = 0
+            else:
+                _ping_fail_streak[tid] = int(_ping_fail_streak.get(tid, 0)) + 1
+            streak = int(_ping_fail_streak.get(tid, 0))
+
             prev = _ping_prev_online.get(tid)
             if prev is False and online:
                 add_event("OK", f"{t['name']} ({t['host']}) 已恢复在线", dedup_key=f"up_{tid}")
@@ -677,8 +727,8 @@ def run_ping_round() -> None:
                 )
             elif (not soft) and online and current is not None and current >= DANGER_LATENCY_MS:
                 add_event("WARN", f"{t['name']} 延迟过高: {current:.1f} ms", dedup_key=f"lat_{tid}")
-            elif (not soft) and loss >= WARN_LOSS and not online:
-                # 持续不可达时的丢包汇总，软目标不刷
+            elif (not soft) and loss >= WARN_LOSS and not online and streak >= 2:
+                # 持续不可达时的丢包汇总，软目标不刷；连续失败才提示
                 add_event("WARN", f"{t['name']} 丢包率偏高: {loss:.1f}%", dedup_key=f"loss_{tid}")
 
             _ping_prev_online[tid] = online
@@ -694,6 +744,7 @@ def run_ping_round() -> None:
                 "max_ms": max_ms,
                 "avg_ms": avg_ms,
                 "loss_percent": loss,
+                "fail_streak": streak,
                 "status": status,
                 "last_check": now_iso,
                 "detail": detail,
@@ -796,14 +847,24 @@ def build_status_payload() -> Dict[str, Any]:
                         "max_ms": None,
                         "avg_ms": None,
                         "loss_percent": None,
+                        "fail_streak": 0,
                         "status": "pending",
                         "last_check": None,
                         "detail": "pending",
                         "history_ms": history_ms,
                     }
                 )
+        # 服务端排序：在线优先、延迟升序，前端可覆盖
+        targets.sort(
+            key=lambda x: (
+                0 if x.get("online") else 1,
+                float(x["current_ms"]) if x.get("current_ms") is not None else 1e9,
+                str(x.get("name") or ""),
+            )
+        )
         runtime = detect_runtime()
         online_n = sum(1 for t in targets if t.get("online"))
+        total_n = len(targets)
         online_avgs = [
             float(t["avg_ms"])
             for t in targets
@@ -819,13 +880,24 @@ def build_status_payload() -> Dict[str, Any]:
             for t in targets
             if t.get("online") and t.get("max_ms") is not None
         ]
+        ratio = (online_n / total_n) if total_n else 0.0
+        if ratio >= 0.9:
+            quality = "excellent"
+        elif ratio >= 0.75:
+            quality = "good"
+        elif ratio >= 0.5:
+            quality = "fair"
+        else:
+            quality = "poor"
         ping_summary = {
-            "total": len(targets),
+            "total": total_n,
             "online": online_n,
-            "offline": max(0, len(targets) - online_n),
+            "offline": max(0, total_n - online_n),
             "avg_ms": round(sum(online_avgs) / len(online_avgs), 1) if online_avgs else None,
             "min_ms": round(min(online_mins), 1) if online_mins else None,
             "max_ms": round(max(online_maxs), 1) if online_maxs else None,
+            "online_ratio": round(ratio, 3),
+            "quality": quality,
         }
         payload = {
             "ok": True,
@@ -833,6 +905,7 @@ def build_status_payload() -> Dict[str, Any]:
             "runtime": runtime,
             "timezone": _tz_label(),
             "server_time": _now_iso(),
+            "started_at": datetime.fromtimestamp(_start_time).astimezone().isoformat(timespec="seconds"),
             "uptime_seconds": int(time.time() - _start_time),
             "collect_ms": round(_metrics_collect_ms, 2),
             "metrics_age_seconds": round(time.time() - _metrics_updated_at, 2)
@@ -856,6 +929,7 @@ def build_status_payload() -> Dict[str, Any]:
                 "targets": targets,
             },
             "events": list(_events)[:EVENT_MAX],
+            "event_count": len(_events),
         }
     return payload
 
@@ -938,6 +1012,8 @@ class ProbeHandler(BaseHTTPRequestHandler):
             elif path == "/health":
                 with _state_lock:
                     ping_av = _ping_available
+                    online_n = sum(1 for r in _ping_results.values() if r.get("online"))
+                    total_n = len(PING_TARGETS)
                 self._send_json(
                     200,
                     {
@@ -946,8 +1022,35 @@ class ProbeHandler(BaseHTTPRequestHandler):
                         "uptime_seconds": int(time.time() - _start_time),
                         "runtime": detect_runtime(),
                         "ping_available": bool(ping_av) if ping_av is not None else None,
+                        "ping_online": online_n,
+                        "ping_total": total_n,
                     },
                 )
+            elif path == "/api/summary":
+                # 轻量摘要：多开页面或外部探活可少传数据
+                try:
+                    full = build_status_payload()
+                    ps = (full.get("ping") or {}).get("summary") or {}
+                    sysd = full.get("system") or {}
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "version": full.get("version"),
+                            "runtime": full.get("runtime"),
+                            "uptime_seconds": full.get("uptime_seconds"),
+                            "collect_ms": full.get("collect_ms"),
+                            "cpu_percent": sysd.get("cpu_percent"),
+                            "memory_percent": sysd.get("memory_percent"),
+                            "disk_percent": sysd.get("disk_percent"),
+                            "ping_online": ps.get("online"),
+                            "ping_total": ps.get("total"),
+                            "ping_quality": ps.get("quality"),
+                            "ping_avg_ms": ps.get("avg_ms"),
+                        },
+                    )
+                except Exception:
+                    self._send_json(500, {"ok": False, "error": "internal_error"})
             else:
                 self._send_json(404, {"ok": False, "error": "not_found"})
         except Exception:
@@ -1484,10 +1587,61 @@ button:focus-visible, select:focus-visible {
   opacity: 0.9;
 }
 .spark-cell { min-width: 80px; }
+.quality-chip {
+  font-size: 10px; margin-left: 6px;
+  border-radius: 999px; padding: 2px 8px;
+  border: 1px solid rgba(0,255,106,0.3); color: var(--ok);
+}
+.quality-chip.good { color: var(--ok); }
+.quality-chip.fair { color: var(--warn); border-color: rgba(255,204,0,0.35); }
+.quality-chip.poor { color: var(--danger); border-color: rgba(255,51,85,0.4); }
+.quality-chip.excellent { color: var(--ok); box-shadow: 0 0 6px rgba(0,255,136,0.25); }
+.copy-btn {
+  margin-left: 6px; cursor: pointer; font-size: 10px;
+  color: var(--dim); border: 1px solid rgba(0,255,106,0.25);
+  background: transparent; border-radius: 3px; padding: 0 5px;
+  font-family: var(--font);
+}
+.copy-btn:hover { color: var(--ok); border-color: var(--ok); }
+.stale-banner {
+  display: none; margin-bottom: 10px; padding: 6px 10px;
+  border: 1px solid var(--warn); color: var(--warn);
+  background: rgba(40, 30, 0, 0.55); border-radius: 3px; font-size: 11px;
+}
+.stale-banner.show { display: block; }
+.ping-table tbody tr:nth-child(even) { background: rgba(0, 255, 106, 0.03); }
+.ping-card .streak {
+  font-size: 9px; color: var(--danger); margin-left: 4px;
+}
+.help-pop {
+  display: none; position: fixed; right: 14px; bottom: 72px; z-index: 80;
+  width: min(320px, calc(100vw - 28px));
+  background: rgba(0, 12, 6, 0.96);
+  border: 1px solid rgba(0,255,106,0.35);
+  border-radius: 6px; padding: 12px 14px;
+  font-size: 11px; color: var(--text); line-height: 1.55;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.help-pop.show { display: block; }
+.help-pop h3 { color: var(--ok); font-size: 12px; margin-bottom: 6px; letter-spacing: 0.08em; }
+.help-pop .row { color: var(--dim); margin: 3px 0; }
+.help-pop .row strong { color: var(--text); font-weight: normal; }
 body.perf-mode .scanlines { display: none !important; }
 body.perf-mode #rain { display: none !important; opacity: 0 !important; }
 body.perf-mode .panel { box-shadow: none; }
+body.perf-mode .spark { display: none; }
 body.perf-mode .toolbar .hint .kbd { display: none; }
+body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
+.icon-btn, .theme-btn, .toolbar label, .toolbar select { min-height: 28px; }
+.icon-btn:focus-visible, .theme-btn:focus-visible, .toolbar input:focus-visible,
+.toolbar select:focus-visible, .copy-btn:focus-visible {
+  outline: 1px solid var(--ok); outline-offset: 2px;
+}
+@media print {
+  #rain, .scanlines, .toolbar, .status-bar { display: none !important; }
+  body { background: #fff; color: #000; }
+  .panel { box-shadow: none; border-color: #999; }
+}
 .ping-group h3 {
   font-size: 11px; color: var(--ok); letter-spacing: 0.08em;
   margin-bottom: 6px; font-weight: normal;
@@ -1558,6 +1712,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
   <div class="toolbar" id="toolbar">
     <label title="关闭动画、放慢刷新，适合低配/卡顿时"><input type="checkbox" id="perfToggle" /> 性能模式</label>
     <label title="关闭可进一步降低卡顿"><input type="checkbox" id="rainToggle" checked /> 背景动画</label>
+    <label title="底栏仅保留关键项"><input type="checkbox" id="compactFooter" /> 紧凑底栏</label>
     <label class="event-filters">事件
       <select id="eventFilter" title="过滤事件等级">
         <option value="all">全部</option>
@@ -1565,7 +1720,27 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
         <option value="error">仅错误</option>
       </select>
     </label>
-    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新 · 日期时间为浏览器本地时区</span>
+    <label class="event-filters">刷新
+      <select id="pollInterval" title="前端轮询间隔">
+        <option value="3000">3s</option>
+        <option value="5000">5s</option>
+        <option value="10000">10s</option>
+      </select>
+    </label>
+    <button type="button" id="exportBtn" class="icon-btn" title="导出当前状态 JSON">⬇</button>
+    <button type="button" id="helpBtn" class="icon-btn" title="快捷键帮助 (?)">?</button>
+    <span class="hint" id="runtimeHint">运行模式检测中… · <span class="kbd">A</span>动画 <span class="kbd">P</span>性能 <span class="kbd">R</span>刷新 <span class="kbd">?</span>帮助</span>
+  </div>
+  <div id="staleBanner" class="stale-banner">数据偏旧，正在重试连接…</div>
+  <div id="helpPop" class="help-pop" role="dialog" aria-label="快捷键帮助">
+    <h3>快捷键</h3>
+    <div class="row"><strong>R</strong> 立即刷新</div>
+    <div class="row"><strong>A</strong> 背景动画</div>
+    <div class="row"><strong>P</strong> 性能模式</div>
+    <div class="row"><strong>C</strong> 紧凑底栏</div>
+    <div class="row"><strong>E</strong> 导出 JSON</div>
+    <div class="row"><strong>?</strong> 打开/关闭本帮助</div>
+    <div class="row">双击主机名可复制</div>
   </div>
 
   <div class="grid">
@@ -1576,7 +1751,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     </section>
 
     <section class="panel" id="pingPanel">
-      <h2 id="pingTitle">02 // 外部探测</h2>
+      <h2 id="pingTitle">02 // 外部探测 <span class="quality-chip" id="qualityChip" style="display:none"></span></h2>
       <div class="ping-summary" id="pingSummary"></div>
       <div class="ping-groups" id="pingGroups"></div>
       <div class="scroll-x ping-table-wrap">
@@ -1635,15 +1810,19 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
   var RAIN_KEY = "vps-probe-rain";
   var EVENT_FILTER_KEY = "vps-probe-event-filter";
   var PERF_KEY = "vps-probe-perf";
+  var COMPACT_KEY = "vps-probe-compact-footer";
+  var POLL_KEY = "vps-probe-poll-ms";
   var reducedMotion = false;
   var rainEnabled = true;
   var perfMode = false;
+  var compactFooter = false;
   var eventFilter = "warn";
   var lastEventsRaw = [];
   var rainRaf = 0;
   var resizeTimer = 0;
   var pollMsNormal = 3000;
   var pollMsPerf = 5000;
+  var userPollMs = 3000;
   try {
     reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   } catch (e) {}
@@ -1660,14 +1839,26 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     else {
       var cores = navigator.hardwareConcurrency || 4;
       var saveData = !!(navigator.connection && navigator.connection.saveData);
-      if (cores <= 2 || saveData || reducedMotion) perfMode = true;
+      var battLow = false;
+      try {
+        if (navigator.getBattery) {
+          /* 异步补判；首次仍用 cores/saveData */
+        }
+      } catch (e2) {}
+      if (cores <= 2 || saveData || reducedMotion || battLow) perfMode = true;
     }
+    compactFooter = localStorage.getItem(COMPACT_KEY) === "1";
+    var _lsPoll = parseInt(localStorage.getItem(POLL_KEY) || "0", 10);
+    if (_lsPoll === 3000 || _lsPoll === 5000 || _lsPoll === 10000) userPollMs = _lsPoll;
   } catch (e) {}
   if (perfMode) {
     rainEnabled = false;
-    pollMs = pollMsPerf;
+    pollMs = Math.max(userPollMs, pollMsPerf);
   } else {
-    pollMs = pollMsNormal;
+    pollMs = userPollMs || pollMsNormal;
+  }
+  if (compactFooter) {
+    try { document.body.classList.add("compact-footer"); } catch (e) {}
   }
 
   function $(id) { return document.getElementById(id); }
@@ -1708,7 +1899,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     document.body.classList.toggle("perf-mode", perfMode);
     var pt = $("perfToggle");
     if (pt) pt.checked = perfMode;
-    pollMs = perfMode ? pollMsPerf : pollMsNormal;
+    pollMs = perfMode ? Math.max(userPollMs, pollMsPerf) : userPollMs;
     resetPollTimer();
     if (perfMode) {
       setRainEnabled(false, true);
@@ -1721,6 +1912,94 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       } catch (e) {}
       if (!reducedMotion) setRainEnabled(wantRain, true);
     }
+  }
+
+  function setCompactFooter(on) {
+    compactFooter = !!on;
+    try { localStorage.setItem(COMPACT_KEY, compactFooter ? "1" : "0"); } catch (e) {}
+    document.body.classList.toggle("compact-footer", compactFooter);
+    var cf = $("compactFooter");
+    if (cf) cf.checked = compactFooter;
+  }
+
+  function setUserPollMs(ms) {
+    ms = parseInt(ms, 10);
+    if (ms !== 3000 && ms !== 5000 && ms !== 10000) ms = 3000;
+    userPollMs = ms;
+    try { localStorage.setItem(POLL_KEY, String(ms)); } catch (e) {}
+    pollMs = perfMode ? Math.max(userPollMs, pollMsPerf) : userPollMs;
+    resetPollTimer();
+    var sel = $("pollInterval");
+    if (sel) sel.value = String(userPollMs);
+  }
+
+  function toggleHelp() {
+    var hp = $("helpPop");
+    if (!hp) return;
+    hp.classList.toggle("show");
+  }
+
+  function exportStatusJson() {
+    if (!lastOk) return;
+    try {
+      var blob = new Blob([JSON.stringify(lastOk, null, 2)], { type: "application/json" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "vps-probe-status-" + Date.now() + ".json";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 500);
+    } catch (e) {}
+  }
+
+  function copyText(text) {
+    text = String(text || "");
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () {});
+      return;
+    }
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } catch (e) {}
+  }
+
+  function updateQualityChip(summary) {
+    var chip = $("qualityChip");
+    if (!chip) return;
+    var q = (summary && summary.quality) || "";
+    var map = {
+      excellent: "网络优",
+      good: "网络良",
+      fair: "网络一般",
+      poor: "网络差"
+    };
+    if (!q || !map[q]) {
+      chip.style.display = "none";
+      return;
+    }
+    chip.style.display = "inline";
+    chip.className = "quality-chip " + q;
+    chip.textContent = map[q];
+    chip.title = "在线率 " + ((summary.online_ratio != null ? (summary.online_ratio * 100).toFixed(0) : "—") + "%");
+  }
+
+  function updateStaleBanner(data, online) {
+    var b = $("staleBanner");
+    if (!b) return;
+    var age = data && data.metrics_age_seconds != null ? Number(data.metrics_age_seconds) : 0;
+    var show = !online || age > 15;
+    b.classList.toggle("show", !!show);
+    if (!online) b.textContent = "连接异常，保留最后成功数据并自动重试…";
+    else if (age > 15) b.textContent = "指标数据偏旧（" + age.toFixed(0) + "s），请检查采集线程…";
   }
 
   var sparkCache = {};
@@ -1904,6 +2183,20 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       loadLine += "（每核 " + sys.load_per_core + "）";
     }
     // 界面不展示：系统版本 / 架构 / 物理核心 / 逻辑核心
+    var memAvail = fmtBytes(sys.memory_available);
+    if (sys.memory_available_percent != null) {
+      memAvail += "（" + sys.memory_available_percent + "%）";
+    }
+    var diskFree = fmtBytes(sys.disk_free);
+    if (sys.disk_inode_percent != null && sys.disk_inode_total) {
+      diskFree += " · inode " + sys.disk_inode_percent + "%";
+    }
+    var netUp = fmtBytes(sys.net_bytes_sent);
+    var netDown = fmtBytes(sys.net_bytes_recv);
+    if (sys.net_exclude_loopback) {
+      netUp += "（不含回环）";
+      netDown += "（不含回环）";
+    }
     var items = [
       ["主机名", hostShow],
       ["操作系统", sys.os_name],
@@ -1911,19 +2204,22 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       ["CPU 型号", cpuModel],
       ["负载 1/5/15", loadLine],
       ["内存", fmtBytes(sys.memory_used) + " / " + fmtBytes(sys.memory_total)],
-      ["可用内存", fmtBytes(sys.memory_available)],
+      ["可用内存", memAvail],
       ["Swap", fmtBytes(sys.swap_used) + " / " + fmtBytes(sys.swap_total)],
       [diskLabel, fmtBytes(sys.disk_used) + " / " + fmtBytes(sys.disk_total)],
-      ["磁盘可用", fmtBytes(sys.disk_free)],
+      ["磁盘可用", diskFree],
       ["启动时间", sys.boot_time],
       ["持续运行", fmtUptime(sys.uptime_seconds)],
       ["登录用户", sys.users],
       ["进程数", sys.processes],
-      ["累计上传", fmtBytes(sys.net_bytes_sent)],
-      ["累计下载", fmtBytes(sys.net_bytes_recv)],
+      ["累计上传", netUp],
+      ["累计下载", netDown],
       ["上传速率", fmtRate(sys.net_up_rate)],
       ["下载速率", fmtRate(sys.net_down_rate)]
     ];
+    if (sys.net_top_iface) {
+      items.push(["主网卡", sys.net_top_iface]);
+    }
     var hSig = sysHist ? (sysHist.cpu.join(",") + "|" + sysHist.mem.join(",") + "|" + sysHist.swap.join(",") + "|" + sysHist.disk.join(",")) : "";
     var sig = items.map(function (it) { return it[0] + "=" + it[1]; }).join("|") +
       "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent +
@@ -1936,11 +2232,32 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       var div = document.createElement("div");
       div.className = "item";
       var longCls = (it[0] === "CPU 型号" || String(it[1]).length > 28) ? "v v-long" : "v";
-      div.innerHTML = '<span class="k">' + esc(it[0]) + '</span><span class="' + longCls + '" title="' + esc(it[1]) + '">' + esc(it[1]) + '</span>';
+      var extra = "";
+      if (it[0] === "主机名") {
+        extra = ' <button type="button" class="copy-btn" data-copy="' + esc(it[1]) + '" title="复制主机名">复制</button>';
+      }
+      div.innerHTML = '<span class="k">' + esc(it[0]) + '</span><span class="' + longCls + '" title="' + esc(it[1]) + '">' + esc(it[1]) + extra + '</span>';
       frag.appendChild(div);
     }
     $("sysKv").innerHTML = "";
     $("sysKv").appendChild(frag);
+    // 复制按钮 / 双击复制
+    var copyBtns = $("sysKv").querySelectorAll(".copy-btn");
+    for (var bi = 0; bi < copyBtns.length; bi++) {
+      copyBtns[bi].addEventListener("click", function (ev) {
+        ev.preventDefault();
+        copyText(this.getAttribute("data-copy") || "");
+        this.textContent = "已复制";
+        var self = this;
+        setTimeout(function () { self.textContent = "复制"; }, 1200);
+      });
+    }
+    var hostVal = $("sysKv").querySelector(".item .v");
+    if (hostVal) {
+      hostVal.addEventListener("dblclick", function () {
+        copyText(hostShow);
+      });
+    }
     $("sysMeters").innerHTML =
       meterHtml("CPU", sys.cpu_percent, sys.cpu_status, sysHist ? sysHist.cpu : null) +
       meterHtml("内存", sys.memory_percent, sys.memory_status, sysHist ? sysHist.mem : null) +
@@ -1952,6 +2269,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     if (!detail) return "—";
     if (detail === "icmp" || detail === "ok") return "ICMP";
     if (detail === "tcp443") return "TCP443";
+    if (detail === "tcp80") return "TCP80";
     if (String(detail).indexOf("tcp") === 0) return "TCP";
     if (detail === "pending") return "等待";
     return "—";
@@ -1965,13 +2283,17 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
     var online = s.online != null ? s.online : 0;
     var offline = s.offline != null ? s.offline : Math.max(0, total - online);
     var avg = s.avg_ms != null ? Number(s.avg_ms).toFixed(1) + " ms" : "—";
-    var ratio = total ? online / total : 0;
+    var ratio = s.online_ratio != null ? s.online_ratio : (total ? online / total : 0);
     var cls = ratio >= 0.85 ? "ok" : (ratio >= 0.5 ? "warn" : "danger");
     var globalMin = s.min_ms != null ? Number(s.min_ms).toFixed(1) + " ms" : "—";
     var globalMax = s.max_ms != null ? Number(s.max_ms).toFixed(1) + " ms" : "—";
+    var qmap = { excellent: "优", good: "良", fair: "一般", poor: "差" };
+    var q = s.quality && qmap[s.quality] ? qmap[s.quality] : "—";
+    updateQualityChip(s);
     el.innerHTML =
       '<span class="ps ' + cls + '">在线 <strong>' + online + "/" + total + "</strong></span>" +
       '<span class="ps">离线 <strong>' + offline + "</strong></span>" +
+      '<span class="ps ' + cls + '">质量 <strong>' + esc(q) + "</strong></span>" +
       '<span class="ps">均延迟 <strong>' + esc(avg) + "</strong></span>" +
       '<span class="ps">最低 <strong>' + esc(globalMin) + "</strong></span>" +
       '<span class="ps">最高 <strong>' + esc(globalMax) + "</strong></span>" +
@@ -1998,7 +2320,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       $("pingTitle").textContent = "02 // 外部探测 · " + onlineN + "/" + targets.length + " 在线" + mode;
     }
     var sig = targets.map(function (t) {
-      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.detail, t.last_check, (t.history_ms || []).join(",")].join(":");
+      return [t.id, t.online, t.current_ms, t.min_ms, t.max_ms, t.avg_ms, t.loss_percent, t.status, t.detail, t.fail_streak, t.last_check, (t.history_ms || []).join(",")].join(":");
     }).join("|");
     if (sig === lastPingSig) return;
     lastPingSig = sig;
@@ -2009,17 +2331,18 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       var stLabel = t.online ? "在线" : (st === "unavailable" ? "不可用" : (st === "pending" ? "等待" : "不可达"));
       var g = t.group === "dns" ? "DNS" : "网站";
       var soft = t.soft_alert ? " · 弱网" : "";
+      var streak = t.fail_streak > 1 ? (" · 连败" + t.fail_streak) : "";
       return "<tr>" +
         "<td>" + esc(g) + "</td>" +
         "<td>" + esc(t.name) + (t.soft_alert ? ' <span class="soft">弱网</span>' : "") + "</td>" +
         '<td class="host" title="' + esc(t.host) + '">' + esc(t.host) + "</td>" +
         "<td>" + esc(t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : "—") + "</td>" +
-        '<td class="spark-cell">' + sparklineSvg(t.history_ms) + "</td>" +
+        '<td class="spark-cell">' + (perfMode ? "—" : sparklineSvg(t.history_ms)) + "</td>" +
         "<td>" + esc(ms(t.min_ms)) + "</td>" +
         "<td>" + esc(ms(t.max_ms)) + "</td>" +
         "<td>" + esc(ms(t.avg_ms)) + "</td>" +
         "<td>" + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(1) + "%" : "—") + "</td>" +
-        '<td class="st ' + esc(st) + '">' + esc(stLabel) + "</td>" +
+        '<td class="st ' + esc(st) + '">' + esc(stLabel) + streak + "</td>" +
         "<td>" + esc(methodLabel(t.detail)) + esc(soft) + "</td>" +
         "<td title=\"" + esc(t.last_check || "") + "\">" + esc(compactTime(t.last_check)) + "</td>" +
         "</tr>";
@@ -2039,10 +2362,11 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
           var cls = "ping-card " + (t.online ? (st === "warn" || st === "danger" ? st : "ok") : "offline");
           var cur = t.current_ms != null ? Number(t.current_ms).toFixed(1) + " ms" : (t.online ? "—" : "不可达");
           var soft = t.soft_alert ? '<span class="soft">弱网</span>' : "";
-          return '<div class="' + cls + '"><div class="name">' + esc(t.name) + soft + '</div>' +
+          var streak = (t.fail_streak > 1) ? '<span class="streak">连败' + t.fail_streak + "</span>" : "";
+          return '<div class="' + cls + '"><div class="name">' + esc(t.name) + soft + streak + '</div>' +
             '<div class="host">' + esc(t.host) + '</div>' +
             '<div class="ms">' + esc(cur) + '</div>' +
-            sparklineSvg(t.history_ms) +
+            (perfMode ? "" : sparklineSvg(t.history_ms)) +
             '<div class="meta">丢包 ' + esc(t.loss_percent != null ? Number(t.loss_percent).toFixed(0) + "%" : "—") +
             " · " + esc(methodLabel(t.detail)) +
             " · " + esc(relativeAge(t._age)) + "</div></div>";
@@ -2173,6 +2497,7 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       st = st.replace("T", " ").replace(/\+\d{2}:\d{2}$/, "").replace(/Z$/, "");
     }
     $("fUpdated").textContent = st;
+    updateStaleBanner(data, true);
     renderSystem(data.system || {}, data.system_history || null);
     // 卡片相对时间：用 ping_age 作统一参考
     if (data.ping && data.ping.targets) {
@@ -2219,12 +2544,20 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
         clearTimeout(tid);
         pollFailCount++;
         setOnline(false);
+        updateStaleBanner(lastOk, false);
         if (lastOk) {
           $("fReq").textContent = (performance.now() - t0).toFixed(1);
+        }
+        // 连续失败退避：临时拉长轮询
+        if (pollFailCount >= 2) {
+          var backoff = Math.min(30000, pollMs * Math.min(pollFailCount, 4));
+          if (timer) clearInterval(timer);
+          timer = setInterval(poll, backoff);
         }
       })
       .then(function () {
         pollInFlight = false;
+        if (pollFailCount === 0) resetPollTimer();
       });
   }
 
@@ -2418,7 +2751,29 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       renderEvents(lastEventsRaw);
     });
   }
-  // 快捷键：R 刷新 / A 动画 / P 性能模式
+  var compactEl = $("compactFooter");
+  if (compactEl) {
+    compactEl.checked = compactFooter;
+    compactEl.addEventListener("change", function () {
+      setCompactFooter(compactEl.checked);
+    });
+  }
+  var pollEl = $("pollInterval");
+  if (pollEl) {
+    pollEl.value = String(userPollMs);
+    pollEl.addEventListener("change", function () {
+      setUserPollMs(pollEl.value);
+    });
+  }
+  var exportBtn = $("exportBtn");
+  if (exportBtn) {
+    exportBtn.addEventListener("click", exportStatusJson);
+  }
+  var helpBtn = $("helpBtn");
+  if (helpBtn) {
+    helpBtn.addEventListener("click", toggleHelp);
+  }
+  // 快捷键：R 刷新 / A 动画 / P 性能 / C 紧凑 / E 导出 / ? 帮助
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     var tag = (ev.target && ev.target.tagName) || "";
@@ -2429,8 +2784,28 @@ body.perf-mode .toolbar .hint .kbd { display: none; }
       if (!reducedMotion && !perfMode) setRainEnabled(!rainEnabled);
     } else if (ev.key === "p" || ev.key === "P") {
       setPerfMode(!perfMode);
+    } else if (ev.key === "c" || ev.key === "C") {
+      setCompactFooter(!compactFooter);
+    } else if (ev.key === "e" || ev.key === "E") {
+      exportStatusJson();
+    } else if (ev.key === "?" || ev.key === "/") {
+      toggleHelp();
+    } else if (ev.key === "Escape") {
+      var hp = $("helpPop");
+      if (hp) hp.classList.remove("show");
     }
   });
+
+  // 电池电量低时建议性能模式（不强制覆盖用户已选 0）
+  try {
+    if (navigator.getBattery && localStorage.getItem(PERF_KEY) === null) {
+      navigator.getBattery().then(function (b) {
+        if (b && b.level < 0.2 && !b.charging && !perfMode) {
+          setPerfMode(true);
+        }
+      }).catch(function () {});
+    }
+  } catch (e) {}
 
   if (!reducedMotion && rainEnabled && !perfMode) {
     resizeRain();
