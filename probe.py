@@ -1550,6 +1550,49 @@ footer.status-bar strong {
 .ping-summary .ps.warn strong { color: var(--warn); }
 .ping-summary .ps.danger strong { color: var(--danger); }
 .ping-groups { display: flex; flex-direction: column; gap: 12px; }
+/* 分组折叠 */
+.ping-group-header {
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none;
+  padding: 4px 0;
+}
+.ping-group-header h3 {
+  margin: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.ping-group-header .fold-icon {
+  font-size: 10px; color: var(--dim);
+  transition: transform 0.2s;
+  display: inline-block;
+}
+.ping-group.collapsed .fold-icon { transform: rotate(-90deg); }
+.ping-group.collapsed .ping-cards { display: none !important; }
+.ping-group.collapsed .ping-table-wrap { display: none !important; }
+/* 探测筛选按钮组 */
+.ping-filter-bar {
+  display: flex; gap: 6px; align-items: center;
+  margin-bottom: 8px;
+}
+.ping-filter-btn {
+  appearance: none; cursor: pointer;
+  font-family: var(--font); font-size: 10px;
+  color: var(--dim);
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(0,255,106,0.2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  transition: all 0.15s;
+}
+.ping-filter-btn:hover {
+  border-color: rgba(0,255,106,0.4);
+  color: var(--text);
+}
+.ping-filter-btn.active {
+  color: var(--ok);
+  border-color: rgba(0,255,106,0.6);
+  background: rgba(0,255,106,0.1);
+}
 .ping-card .soft {
   display: inline-block; margin-left: 4px; font-size: 9px;
   color: var(--warn); border: 1px solid rgba(255,204,0,0.3);
@@ -1752,6 +1795,11 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
 
     <section class="panel" id="pingPanel">
       <h2 id="pingTitle">02 // 外部探测 <span class="quality-chip" id="qualityChip" style="display:none"></span></h2>
+      <div class="ping-filter-bar" id="pingFilterBar">
+        <button type="button" class="ping-filter-btn active" data-filter="all">全部</button>
+        <button type="button" class="ping-filter-btn" data-filter="dns">仅 DNS</button>
+        <button type="button" class="ping-filter-btn" data-filter="web">仅网站</button>
+      </div>
       <div class="ping-summary" id="pingSummary"></div>
       <div class="ping-groups" id="pingGroups"></div>
       <div class="scroll-x ping-table-wrap">
@@ -1798,6 +1846,16 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
   var lastEventsSig = "";
   var lastSysSig = "";
   var lastPingSig = "";
+  var PING_FILTER_KEY = "vps-probe-ping-filter";
+  var PING_FOLD_KEY = "vps-probe-ping-fold";
+  var pingGroupFilter = "all";
+  var pingFolded = { dns: false, web: false };
+  try {
+    var _pf = localStorage.getItem(PING_FILTER_KEY);
+    if (_pf === "dns" || _pf === "web" || _pf === "all") pingGroupFilter = _pf;
+    var _pfd = localStorage.getItem(PING_FOLD_KEY);
+    if (_pfd) { var _f = JSON.parse(_pfd); if (_f && typeof _f === "object") pingFolded = _f; }
+  } catch (e) {}
   var pollMs = 3000;
   var pollMsHidden = 8000;
   var timer = null;
@@ -2313,6 +2371,12 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       return;
     }
     var targets = sortTargets(ping.targets || []);
+    /* 前端筛选：仅 DNS / 仅网站 */
+    if (pingGroupFilter === "dns") {
+      targets = targets.filter(function (t) { return t.group === "dns"; });
+    } else if (pingGroupFilter === "web") {
+      targets = targets.filter(function (t) { return t.group !== "dns"; });
+    }
     renderPingSummary(ping);
     if ($("pingTitle")) {
       var onlineN = targets.filter(function (t) { return t.online; }).length;
@@ -2355,8 +2419,11 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
         var g = t.group === "dns" ? "dns" : "web";
         buckets[g].push(t);
       });
-      var html = ["dns", "web"].map(function (g) {
+      var html = ["dns", "web"].filter(function (g) {
+        return buckets[g].length > 0;
+      }).map(function (g) {
         var title = g === "dns" ? "DNS" : "网站";
+        var folded = pingFolded[g] ? " collapsed" : "";
         var cards = buckets[g].map(function (t) {
           var st = t.status || (t.online ? "ok" : "offline");
           var cls = "ping-card " + (t.online ? (st === "warn" || st === "danger" ? st : "ok") : "offline");
@@ -2371,7 +2438,11 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
             " · " + esc(methodLabel(t.detail)) +
             " · " + esc(relativeAge(t._age)) + "</div></div>";
         }).join("");
-        return '<div class="ping-group"><h3>' + title + " · " + buckets[g].length + '</h3><div class="ping-cards">' + cards + "</div></div>";
+        return '<div class="ping-group' + folded + '" data-group="' + g + '">' +
+          '<div class="ping-group-header" data-group="' + g + '">' +
+          '<span class="fold-icon">▾</span>' +
+          '<h3>' + title + " · " + buckets[g].length + '</h3>' +
+          '</div><div class="ping-cards">' + cards + "</div></div>";
       }).join("");
       groupsEl.innerHTML = html;
     }
@@ -2749,6 +2820,39 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       try { localStorage.setItem(EVENT_FILTER_KEY, eventFilter); } catch (e) {}
       lastEventsSig = "";
       renderEvents(lastEventsRaw);
+    });
+  }
+  /* 探测分组筛选按钮 */
+  var pingFilterBar = $("pingFilterBar");
+  if (pingFilterBar) {
+    var filterBtns = pingFilterBar.querySelectorAll(".ping-filter-btn");
+    filterBtns.forEach(function (btn) {
+      if (btn.getAttribute("data-filter") === pingGroupFilter) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+      btn.addEventListener("click", function () {
+        pingGroupFilter = btn.getAttribute("data-filter") || "all";
+        try { localStorage.setItem(PING_FILTER_KEY, pingGroupFilter); } catch (e) {}
+        filterBtns.forEach(function (b) { b.classList.toggle("active", b === btn); });
+        lastPingSig = "";
+        if (lastOk) renderPing(lastOk.ping);
+      });
+    });
+  }
+  /* 探测分组折叠事件委托 */
+  var pingGroupsEl = $("pingGroups");
+  if (pingGroupsEl) {
+    pingGroupsEl.addEventListener("click", function (ev) {
+      var hdr = ev.target.closest(".ping-group-header");
+      if (!hdr) return;
+      var grp = hdr.getAttribute("data-group");
+      if (!grp) return;
+      pingFolded[grp] = !pingFolded[grp];
+      try { localStorage.setItem(PING_FOLD_KEY, JSON.stringify(pingFolded)); } catch (e) {}
+      var groupEl = hdr.parentElement;
+      if (groupEl) groupEl.classList.toggle("collapsed", !!pingFolded[grp]);
     });
   }
   var compactEl = $("compactFooter");
