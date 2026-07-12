@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.6.0"
+VERSION = "1.6.2"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 SYS_HISTORY_SIZE = 20           # 系统指标历史样本数（CPU/内存/磁盘趋势图）
 HOST = "0.0.0.0"
@@ -86,6 +86,7 @@ _metrics: Dict[str, Any] = {}
 _metrics_collect_ms = 0.0
 _metrics_updated_at = 0.0
 _prev_net: Optional[Tuple[int, int, float]] = None  # bytes_sent, bytes_recv, ts
+_prev_disk_io: Optional[Tuple[int, int, float]] = None  # read_bytes, write_bytes, ts
 
 # 系统指标历史（趋势图用）
 _sys_history: Dict[str, Deque[float]] = {
@@ -326,6 +327,11 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
             cpu_percent = float(psutil.cpu_percent(interval=None))
     except Exception:
         cpu_percent = 0.0
+    # CPU 每核使用率
+    try:
+        per_cpu = [round(x, 1) for x in psutil.cpu_percent(interval=None, percpu=True)]
+    except Exception:
+        per_cpu = []
     try:
         physical = psutil.cpu_count(logical=False) or 0
         logical = psutil.cpu_count(logical=True) or 0
@@ -416,6 +422,25 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
     except Exception:
         pass
 
+    # 磁盘 I/O 速率（根设备）
+    disk_read_rate = disk_write_rate = 0.0
+    try:
+        dio = psutil.disk_io_counters(perdisk=False)
+        if dio is not None:
+            now_d = time.time()
+            dr = int(dio.read_bytes)
+            dw = int(dio.write_bytes)
+            if _prev_disk_io is not None:
+                pd_r, pd_w, pd_t = _prev_disk_io
+                dt_d = max(now_d - pd_t, 1e-6)
+                if dr >= pd_r:
+                    disk_read_rate = (dr - pd_r) / dt_d
+                if dw >= pd_w:
+                    disk_write_rate = (dw - pd_w) / dt_d
+            _prev_disk_io = (dr, dw, now_d)
+    except Exception:
+        pass
+
     # 根分区 inode（若系统支持）
     inode_total = inode_used = 0
     inode_percent = 0.0
@@ -447,6 +472,7 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "cpu_physical_cores": physical,
         "cpu_logical_cores": logical,
         "cpu_percent": round(cpu_percent, 1),
+        "cpu_per_core": per_cpu,
         "cpu_status": _status_from_pct(cpu_percent),
         "load_1": round(load1, 2),
         "load_5": round(load5, 2),
@@ -473,6 +499,8 @@ def collect_metrics() -> Tuple[Dict[str, Any], float]:
         "disk_inode_total": inode_total,
         "disk_inode_used": inode_used,
         "disk_inode_percent": inode_percent,
+        "disk_read_rate": round(disk_read_rate, 1),
+        "disk_write_rate": round(disk_write_rate, 1),
         "boot_time": datetime.fromtimestamp(boot_ts).astimezone().isoformat(timespec="seconds"),
         "uptime_seconds": uptime_sec,
         "users": users,
@@ -1243,6 +1271,42 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   background: rgba(0, 255, 106, 0.06);
   border-color: rgba(0,255,106,0.25);
 }
+/* CPU 每核使用率条 */
+.core-bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+  gap: 4px;
+  margin-top: 8px;
+}
+.core-bar {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 9px; color: var(--dim);
+}
+.core-bar .core-label { min-width: 18px; text-align: right; }
+.core-bar .core-track {
+  flex: 1; height: 6px;
+  background: rgba(0,40,15,0.6);
+  border-radius: 2px; overflow: hidden;
+}
+.core-bar .core-fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, #00aa55, var(--ok));
+  transition: width 0.3s linear;
+}
+.core-bar .core-fill.warn { background: linear-gradient(90deg, #aa8800, var(--warn)); }
+.core-bar .core-fill.danger { background: linear-gradient(90deg, #aa0022, var(--danger)); }
+.core-bar .core-pct { min-width: 24px; font-variant-numeric: tabular-nums; }
+/* 磁盘 I/O 速率 */
+.io-row {
+  display: flex; gap: 12px; margin-top: 8px;
+  font-size: 11px; color: var(--dim);
+}
+.io-row .io-item {
+  display: flex; align-items: center; gap: 4px;
+}
+.io-row .io-arrow { font-size: 10px; }
+.io-row .io-arrow.read { color: var(--ok); }
+.io-row .io-arrow.write { color: var(--warn); }
 /* 仪表盘默认：标签在上、值在下 */
 .kv .item .k {
   display: block;
@@ -1722,8 +1786,8 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
 .event-filters { display: inline-flex; gap: 6px; align-items: center; }
 .v-long {
   display: inline-block; max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  vertical-align: bottom;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 </style>
@@ -1791,6 +1855,8 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       <h2>01 // 系统性能 <span class="mode-chip host" id="runtimeChip" style="display:none"></span></h2>
       <div class="kv" id="sysKv"><div class="item"><span class="k">状态</span><span class="v">加载中…</span></div></div>
       <div class="meter" id="sysMeters"></div>
+      <div id="sysCores"></div>
+      <div id="sysIo"></div>
     </section>
 
     <section class="panel" id="pingPanel">
@@ -2279,9 +2345,11 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       items.push(["主网卡", sys.net_top_iface]);
     }
     var hSig = sysHist ? (sysHist.cpu.join(",") + "|" + sysHist.mem.join(",") + "|" + sysHist.swap.join(",") + "|" + sysHist.disk.join(",")) : "";
+    var coreSig = (sys.cpu_per_core || []).join(",");
+    var ioSig = (sys.disk_read_rate || 0) + "," + (sys.disk_write_rate || 0);
     var sig = items.map(function (it) { return it[0] + "=" + it[1]; }).join("|") +
       "|" + sys.cpu_percent + "|" + sys.memory_percent + "|" + sys.swap_percent + "|" + sys.disk_percent +
-      "|" + (sys.runtime || "") + "|" + hSig;
+      "|" + (sys.runtime || "") + "|" + hSig + "|" + coreSig + "|" + ioSig;
     if (sig === lastSysSig) return;
     lastSysSig = sig;
     var frag = document.createDocumentFragment();
@@ -2321,6 +2389,38 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       meterHtml("内存", sys.memory_percent, sys.memory_status, sysHist ? sysHist.mem : null) +
       meterHtml("Swap", sys.swap_percent, sys.swap_status, sysHist ? sysHist.swap : null) +
       meterHtml("磁盘", sys.disk_percent, sys.disk_status, sysHist ? sysHist.disk : null);
+    /* CPU 每核使用率 */
+    var coreEl = $("sysCores");
+    if (coreEl) {
+      var perCpu = sys.cpu_per_core || [];
+      if (perCpu.length > 0) {
+        var coreHtml = perCpu.map(function (pct, i) {
+          var st = pct >= 90 ? "danger" : (pct >= 80 ? "warn" : "");
+          return '<div class="core-bar">' +
+            '<span class="core-label">C' + i + '</span>' +
+            '<div class="core-track"><div class="core-fill ' + st + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+            '<span class="core-pct">' + pct.toFixed(0) + '%</span>' +
+            '</div>';
+        }).join("");
+        coreEl.innerHTML = '<div class="core-bars">' + coreHtml + '</div>';
+      } else {
+        coreEl.innerHTML = "";
+      }
+    }
+    /* 磁盘 I/O 速率 */
+    var ioEl = $("sysIo");
+    if (ioEl) {
+      var readR = sys.disk_read_rate;
+      var writeR = sys.disk_write_rate;
+      if ((readR && readR > 0) || (writeR && writeR > 0)) {
+        ioEl.innerHTML = '<div class="io-row">' +
+          '<span class="io-item"><span class="io-arrow read">▼</span> 读 ' + fmtRate(readR) + '</span>' +
+          '<span class="io-item"><span class="io-arrow write">▲</span> 写 ' + fmtRate(writeR) + '</span>' +
+          '</div>';
+      } else {
+        ioEl.innerHTML = "";
+      }
+    }
   }
 
   function methodLabel(detail) {
