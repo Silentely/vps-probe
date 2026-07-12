@@ -1003,9 +1003,123 @@ footer.bar .sep {
   background: rgba(40,0,8,0.7); border-radius: 3px;
 }
 .err-banner.show { display: block; }
+
+/* ---- 顶栏操作区 ---- */
+.header-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.theme-btn {
+  appearance: none; cursor: pointer;
+  font-family: var(--font); font-size: 11px;
+  color: var(--ok);
+  background: rgba(0, 30, 12, 0.7);
+  border: 1px solid rgba(0,255,106,0.45);
+  border-radius: 999px;
+  padding: 4px 12px;
+  box-shadow: 0 0 8px rgba(0,255,106,0.15);
+  letter-spacing: 0.06em;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.theme-btn:hover {
+  background: rgba(0, 50, 20, 0.85);
+  border-color: var(--ok);
+  box-shadow: 0 0 12px rgba(0,255,136,0.35);
+}
+.theme-btn:focus-visible {
+  outline: 1px solid var(--ok);
+  outline-offset: 2px;
+}
+
+/* ---- 竖向居中滚动主题 ----
+   整页单列居中可滚动；键值对保持「参数 | 值」横向排列 */
+body[data-theme="tower"] {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+body[data-theme="tower"] .wrap {
+  max-width: 520px;
+  margin: 0 auto;
+  min-height: 100%;
+  padding: 16px 14px 100px;
+  align-items: stretch;
+}
+body[data-theme="tower"] header.app {
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+body[data-theme="tower"] header.app h1 {
+  font-size: 14px;
+}
+body[data-theme="tower"] .header-actions {
+  justify-content: center;
+  width: 100%;
+}
+body[data-theme="tower"] .grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+body[data-theme="tower"] .panel {
+  width: 100%;
+}
+body[data-theme="tower"] .terminal {
+  grid-column: auto;
+  min-height: 180px;
+  max-height: none;
+}
+body[data-theme="tower"] .term-body {
+  max-height: 280px;
+}
+/* 竖向主题：每一行参数与值横向排列（非上下堆叠） */
+body[data-theme="tower"] .kv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body[data-theme="tower"] .kv .item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 8px 10px;
+}
+body[data-theme="tower"] .kv .item .k {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+  min-width: 5.2em;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+body[data-theme="tower"] .kv .item .v {
+  flex: 1 1 auto;
+  text-align: right;
+  font-size: 12px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+body[data-theme="tower"] .meter .row {
+  grid-template-columns: 56px 1fr 48px;
+}
+body[data-theme="tower"] .scroll-x {
+  overflow-x: auto;
+}
+body[data-theme="tower"] .ping-table {
+  font-size: 10px;
+}
+body[data-theme="tower"] footer.bar {
+  justify-content: center;
+}
+body[data-theme="tower"] #rain {
+  opacity: 0.14;
+}
 </style>
 </head>
-<body>
+<body data-theme="dashboard">
 <canvas id="rain" aria-hidden="true"></canvas>
 <div class="scanlines" aria-hidden="true"></div>
 <div class="wrap">
@@ -1014,7 +1128,10 @@ footer.bar .sep {
       <h1>◈ VPS PROBE // MATRIX</h1>
       <div class="sub">只读系统探针 · 无命令执行 · 零配置</div>
     </div>
-    <div id="onlineBadge" class="badge"><span class="dot"></span><span id="onlineText">连接中…</span></div>
+    <div class="header-actions">
+      <button type="button" id="themeBtn" class="theme-btn" title="切换布局主题" aria-label="切换布局主题">竖向主题</button>
+      <div id="onlineBadge" class="badge"><span class="dot"></span><span id="onlineText">连接中…</span></div>
+    </div>
   </header>
   <div id="errBanner" class="err-banner">与后端连接异常，正在重试并保留最后成功数据…</div>
 
@@ -1078,8 +1195,39 @@ footer.bar .sep {
   var clockTimer = null;
   var serviceUptimeBase = 0;
   var serviceUptimeAt = 0;
+  var THEME_KEY = "vps-probe-theme";
+  var THEMES = { dashboard: "仪表盘", tower: "竖向主题" };
 
   function $(id) { return document.getElementById(id); }
+
+  function getTheme() {
+    try {
+      var t = localStorage.getItem(THEME_KEY);
+      if (t === "tower" || t === "dashboard") return t;
+    } catch (e) {}
+    return "dashboard";
+  }
+
+  function applyTheme(theme) {
+    if (theme !== "tower" && theme !== "dashboard") theme = "dashboard";
+    document.body.setAttribute("data-theme", theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+    var btn = $("themeBtn");
+    if (btn) {
+      // 按钮文案表示「切换到」的目标主题
+      btn.textContent = theme === "tower" ? "仪表盘" : "竖向主题";
+      btn.setAttribute("aria-pressed", theme === "tower" ? "true" : "false");
+      btn.title = theme === "tower" ? "切换为仪表盘布局" : "切换为竖向居中布局";
+    }
+    // 主题切换后重算数字雨画布
+    if (typeof resizeRain === "function") {
+      try { resizeRain(); } catch (e) {}
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(getTheme() === "tower" ? "dashboard" : "tower");
+  }
 
   function fmtBytes(n) {
     if (n == null || isNaN(n)) return "—";
@@ -1141,18 +1289,19 @@ footer.bar .sep {
 
   function renderSystem(sys) {
     if (!sys || !Object.keys(sys).length) {
-      $("sysKv").innerHTML = '<div class="item"><div class="k">状态</div><div class="v">等待首次采集…</div></div>';
+      $("sysKv").innerHTML = '<div class="item"><span class="k">状态</span><span class="v">等待首次采集…</span></div>';
       return;
     }
+    // 物理/逻辑核心、系统版本、架构等均单独成行，避免合并隐藏
     var items = [
       ["主机名", sys.hostname],
       ["操作系统", sys.os_name],
-      ["系统版本", sys.os_version],
+      ["系统版本", sys.os_version != null && sys.os_version !== "" ? sys.os_version : "—"],
       ["内核", sys.kernel],
-      ["架构", sys.arch],
+      ["架构", sys.arch != null && sys.arch !== "" ? sys.arch : "—"],
       ["CPU 型号", sys.cpu_model],
-      ["物理核心", sys.cpu_physical_cores],
-      ["逻辑核心", sys.cpu_logical_cores],
+      ["物理核心", sys.cpu_physical_cores != null ? sys.cpu_physical_cores : "—"],
+      ["逻辑核心", sys.cpu_logical_cores != null ? sys.cpu_logical_cores : "—"],
       ["负载 1/5/15", [sys.load_1, sys.load_5, sys.load_15].join(" / ")],
       ["内存", fmtBytes(sys.memory_used) + " / " + fmtBytes(sys.memory_total)],
       ["可用内存", fmtBytes(sys.memory_available)],
@@ -1169,7 +1318,7 @@ footer.bar .sep {
       ["下载速率", fmtRate(sys.net_down_rate)]
     ];
     $("sysKv").innerHTML = items.map(function (it) {
-      return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
+      return '<div class="item"><span class="k">' + esc(it[0]) + '</span><span class="v">' + esc(it[1]) + '</span></div>';
     }).join("");
     $("sysMeters").innerHTML =
       meterHtml("CPU", sys.cpu_percent, sys.cpu_status) +
@@ -1350,6 +1499,15 @@ footer.bar .sep {
   window.addEventListener("resize", function () {
     resizeRain();
   });
+
+  // 主题：读取本地偏好并绑定切换（纯前端，无配置文件）
+  applyTheme(getTheme());
+  var themeBtn = $("themeBtn");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", function () {
+      toggleTheme();
+    });
+  }
 
   resizeRain();
   requestAnimationFrame(drawRain);
