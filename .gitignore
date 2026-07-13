@@ -26,3 +26,4 @@ _remote_build.sh
 _remote_verify.sh
 _footer_inspect*.js
 images/
+.ace-tool/

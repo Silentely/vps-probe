@@ -33,7 +33,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 内置常量（无环境变量、无配置文件）
 # ---------------------------------------------------------------------------
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 SPARK_HISTORY = 20              # 返回前端的延迟样本数（火花图）
 SYS_HISTORY_SIZE = 20           # 系统指标历史样本数（CPU/内存/磁盘趋势图）
 HOST = "0.0.0.0"
@@ -1271,31 +1271,10 @@ header.app .sub { color: var(--dim); font-size: 11px; }
   background: rgba(0, 255, 106, 0.06);
   border-color: rgba(0,255,106,0.25);
 }
-/* CPU 每核使用率条 */
-.core-bars {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
-  gap: 4px;
-  margin-top: 8px;
-}
-.core-bar {
-  display: flex; align-items: center; gap: 4px;
-  font-size: 9px; color: var(--dim);
-}
-.core-bar .core-label { min-width: 18px; text-align: right; }
-.core-bar .core-track {
-  flex: 1; height: 6px;
-  background: rgba(0,40,15,0.6);
-  border-radius: 2px; overflow: hidden;
-}
-.core-bar .core-fill {
-  height: 100%; border-radius: 2px;
-  background: linear-gradient(90deg, #00aa55, var(--ok));
-  transition: width 0.3s linear;
-}
-.core-bar .core-fill.warn { background: linear-gradient(90deg, #aa8800, var(--warn)); }
-.core-bar .core-fill.danger { background: linear-gradient(90deg, #aa0022, var(--danger)); }
-.core-bar .core-pct { min-width: 24px; font-variant-numeric: tabular-nums; }
+/* CPU 每核使用率：与 CPU/内存/Swap/磁盘同一套 meter 行样式 */
+#sysCores.meter { margin-top: 0; }
+#sysCores.meter .row { margin-bottom: 6px; }
+#sysCores.meter .row:last-child { margin-bottom: 0; }
 /* 磁盘 I/O 速率 */
 .io-row {
   display: flex; gap: 12px; margin-top: 8px;
@@ -1613,7 +1592,8 @@ footer.status-bar strong {
 .ping-summary .ps.ok strong { color: var(--ok); }
 .ping-summary .ps.warn strong { color: var(--warn); }
 .ping-summary .ps.danger strong { color: var(--danger); }
-.ping-groups { display: flex; flex-direction: column; gap: 12px; }
+/* 桌面用表格；分组卡片仅移动端展示，避免桌面残留「DNS · N / 网站 · N」空标题行 */
+.ping-groups { display: none; flex-direction: column; gap: 12px; }
 /* 分组折叠 */
 .ping-group-header {
   display: flex; align-items: center; gap: 8px;
@@ -1781,6 +1761,7 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
 .ping-card.danger .ms { color: var(--danger); }
 @media (max-width: 960px) {
   .ping-table-wrap { display: none; }
+  .ping-groups { display: flex; }
   .ping-cards { display: grid; }
 }
 .event-filters { display: inline-flex; gap: 6px; align-items: center; }
@@ -1855,7 +1836,7 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       <h2>01 // 系统性能 <span class="mode-chip host" id="runtimeChip" style="display:none"></span></h2>
       <div class="kv" id="sysKv"><div class="item"><span class="k">状态</span><span class="v">加载中…</span></div></div>
       <div class="meter" id="sysMeters"></div>
-      <div id="sysCores"></div>
+      <div class="meter" id="sysCores"></div>
       <div id="sysIo"></div>
     </section>
 
@@ -2389,20 +2370,15 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
       meterHtml("内存", sys.memory_percent, sys.memory_status, sysHist ? sysHist.mem : null) +
       meterHtml("Swap", sys.swap_percent, sys.swap_status, sysHist ? sysHist.swap : null) +
       meterHtml("磁盘", sys.disk_percent, sys.disk_status, sysHist ? sysHist.disk : null);
-    /* CPU 每核使用率 */
+    /* CPU 每核使用率：与上方仪表盘同一行布局（标签 + 进度条 + 百分比） */
     var coreEl = $("sysCores");
     if (coreEl) {
       var perCpu = sys.cpu_per_core || [];
       if (perCpu.length > 0) {
-        var coreHtml = perCpu.map(function (pct, i) {
-          var st = pct >= 90 ? "danger" : (pct >= 80 ? "warn" : "");
-          return '<div class="core-bar">' +
-            '<span class="core-label">C' + i + '</span>' +
-            '<div class="core-track"><div class="core-fill ' + st + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
-            '<span class="core-pct">' + pct.toFixed(0) + '%</span>' +
-            '</div>';
+        coreEl.innerHTML = perCpu.map(function (pct, i) {
+          var st = pct >= 90 ? "danger" : (pct >= 80 ? "warn" : "ok");
+          return meterHtml("C" + i, pct, st, null);
         }).join("");
-        coreEl.innerHTML = '<div class="core-bars">' + coreHtml + '</div>';
       } else {
         coreEl.innerHTML = "";
       }
@@ -2541,7 +2517,7 @@ body.compact-footer .status-bar .f-item:nth-child(n+7) { display: none; }
         return '<div class="ping-group' + folded + '" data-group="' + g + '">' +
           '<div class="ping-group-header" data-group="' + g + '">' +
           '<span class="fold-icon">▾</span>' +
-          '<h3>' + title + " · " + buckets[g].length + '</h3>' +
+          '<h3>' + title + '</h3>' +
           '</div><div class="ping-cards">' + cards + "</div></div>";
       }).join("");
       groupsEl.innerHTML = html;
