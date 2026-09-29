@@ -1578,22 +1578,6 @@ header.app .sub { color: var(--dim); font-size: 11px; margin-top: 2px; font-weig
   font-weight: 700;
   font-family: var(--font-mono);
 }
-.copy-btn {
-  margin-left: 6px; cursor: pointer; font-size: 10px; font-weight: 700;
-  color: var(--btn-text); border: 1.5px solid var(--border);
-  background: var(--btn-bg); border-radius: 4px; padding: 1px 6px;
-  box-shadow: 1px 1px 0 var(--border);
-  font-family: var(--font);
-  transition: all 0.1s ease;
-}
-.copy-btn:hover {
-  background: var(--card-hover);
-  transform: translate(-1px, -1px);
-}
-.copy-btn:active {
-  transform: translate(1px, 1px);
-  box-shadow: none;
-}
 .io-row {
   display: flex; gap: 12px; margin-top: 10px;
   font-size: 11px; color: var(--dim); font-family: var(--font-mono); font-weight: 600;
@@ -2015,7 +1999,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
     <div class="row"><strong>C</strong> <span>紧凑底栏</span></div>
     <div class="row"><strong>E</strong> <span>导出 JSON</span></div>
     <div class="row"><strong>?</strong> <span>打开/关闭本帮助</span></div>
-    <div class="row"><span style="color:var(--dim)">双击主机名可复制</span></div>
+    <div class="row"><span style="color:var(--dim)">双击主机名可复制原始主机名</span></div>
   </div>
 
   <div class="grid">
@@ -2585,30 +2569,19 @@ button:focus-visible, select:focus-visible, input:focus-visible {
       var div = document.createElement("div");
       div.className = "item";
       var longCls = (it[0] === "CPU 型号" || String(it[1]).length > 28) ? "v v-long" : "v";
-      var extra = "";
-      if (it[0] === "主机名") {
-        extra = ' <button type="button" class="copy-btn" data-copy="' + esc(it[1]) + '" title="复制主机名">复制</button>';
-      }
-      div.innerHTML = '<span class="k">' + esc(it[0]) + '</span><span class="' + longCls + '" title="' + esc(it[1]) + '">' + esc(it[1]) + extra + '</span>';
+      // 主机名行的 title 追加双击提示，弥补移除复制按钮后的可发现性
+      var tip = it[0] === "主机名" ? '（双击复制）' : "";
+      div.innerHTML = '<span class="k">' + esc(it[0]) + '</span><span class="' + longCls + '" title="' + esc(it[1] + tip) + '">' + esc(it[1]) + '</span>';
       frag.appendChild(div);
     }
     $("sysKv").innerHTML = "";
     $("sysKv").appendChild(frag);
 
-    var copyBtns = $("sysKv").querySelectorAll(".copy-btn");
-    for (var bi = 0; bi < copyBtns.length; bi++) {
-      copyBtns[bi].addEventListener("click", function (ev) {
-        ev.preventDefault();
-        copyText(this.getAttribute("data-copy") || "");
-        this.textContent = "已复制";
-        var self = this;
-        setTimeout(function () { self.textContent = "复制"; }, 1200);
-      });
-    }
     var hostVal = $("sysKv").querySelector(".item .v");
     if (hostVal) {
+      // 双击复制原始主机名（不含「容器 · 」展示前缀），便于直接用于连接
       hostVal.addEventListener("dblclick", function () {
-        copyText(hostShow);
+        copyText(sys.hostname || hostShow);
       });
     }
     $("sysMeters").innerHTML =
