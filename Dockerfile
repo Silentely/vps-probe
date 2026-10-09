@@ -1,5 +1,5 @@
 # 轻量 VPS 探针 — 非 root、无特权、含最小 ping 工具
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
